@@ -214,13 +214,20 @@ async function main() {
         `&desc=${encodeURIComponent(description)}` +
         `&fps=${fps}&bitrate=${bitrate}&w=${w}&h=${h}`;
 
+    // GL backend: pick one that works in THIS environment. On Windows use ANGLE +
+    // SwiftShader. On headless Linux avoid the Vulkan-xcb path (no X server → the
+    // ANGLE display fails, glGenBuffers throws 'Cannot read properties of
+    // undefined' and the game never renders); force SwiftShader over GLES-ANGLE.
+    const isWin = process.platform === 'win32';
+    const glFlags = isWin
+        ? ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
+        : ['--use-gl=angle', '--use-angle=swiftshader-webgl', '--enable-unsafe-swiftshader'];
+
     const browser = spawn(chromium, [
         '--headless=new',
         '--no-sandbox',
         '--disable-dev-shm-usage',
-        '--use-gl=angle',
-        '--use-angle=swiftshader',
-        '--enable-unsafe-swiftshader',
+        ...glFlags,
         '--autoplay-policy=no-user-gesture-required',
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
@@ -228,7 +235,7 @@ async function main() {
         // Disable native-window occlusion detection: without this, Windows
         // reports the headless host window as "occluded" when the viewer window
         // takes focus, which throttles rAF/MediaStream and slows the emulator
-        // (game + audio stutter). This is the flag that actually stops that.
+        // (game + audio stutter). Harmless elsewhere.
         '--disable-features=CalculateNativeWinOcclusion',
         '--hide-scrollbars',
         '--disable-gpu-vsync',
