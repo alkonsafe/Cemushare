@@ -87,9 +87,34 @@
         'style=', (c.style.width || '-') + '/' + (c.style.height || '-'),
         'rect=', Math.round(r.width) + 'x' + Math.round(r.height),
         'dpr=', window.devicePixelRatio,
-        'win=', window.innerWidth + 'x' + window.innerHeight);
+        'win=', window.innerWidth + 'x' + window.innerHeight,
+        'cli=', document.documentElement.clientWidth + 'x' + document.documentElement.clientHeight,
+        'scr=', screen.width + 'x' + screen.height);
     };
     snap('booting');
+
+    // Catch EVERY attribute change on the canvas regardless of how it was
+    // written (property setter vs setAttribute) — host.js's prototype cap only
+    // intercepts the property path, so a 1920x270 along a different path would
+    // slip through invisibly. Attribute filter: width, height, style.
+    const attrWatch = new MutationObserver((muts) => {
+      for (const m of muts) {
+        const oldV = m.oldValue || '';
+        const newV = c.getAttribute(m.attributeName) || '';
+        console.log('[m64] attr-changed', m.attributeName,
+          'old=(' + oldV + ')', 'new=(' + newV + ')',
+          't=' + Math.round(performance.now()) + 'ms');
+        if (m.attributeName === 'width' || m.attributeName === 'height') {
+          const r = c.getBoundingClientRect();
+          console.log('[m64]   after:', 'attr=', c.width + 'x' + c.height,
+            'rect=', Math.round(r.width) + 'x' + Math.round(r.height));
+        }
+      }
+    });
+    try {
+      attrWatch.observe(c, { attributes: true, attributeOldValue: true,
+        attributeFilter: ['width', 'height', 'style'] });
+    } catch (e) { console.error('[m64] attrWatch failed:', e); }
     for (const ms of [200, 500, 1000, 2000, 3500]) setTimeout(() => snap('t+' + ms), ms);
     const wrapOnce = setInterval(() => {
       const M = window.Module;
