@@ -442,20 +442,27 @@ function attachHost(ws, consoleParam) {
                 sawFirstFrame = true;
                 log(`host "${cons.name}" (${cons.key}): READY — streaming video to viewers`);
             }
-            // Rate-limit the per-frame summary: logging on EVERY frame makes the
-            // relay block on stdout (Windows Terminal pauses/buffers console
-            // output while its window is unfocused), which stalls frame delivery
-            // to every viewer. Aggregate instead, ~once per second.
-            const nowSec = now / 1000;
-            if (cons.__frameLogSec === undefined) cons.__frameLogSec = 0;
-            if (cons.__frameBytes === undefined) cons.__frameBytes = 0;
-            cons.__frameBytes += data.length;
-            if (nowSec - cons.__frameLogSec >= 1) {
-                if (cons.__frameLogSec > 0) {
-                    logV(`host ${cons.key}: frames≈${(cons.__frameBytes / 1000) | 0} KiB/s (rate-limited)`);
+            // Per-frame logging is OFF unless EMULATOR_LOG=verbose, and even
+            // then it is rate-limited. Logging on EVERY frame blocks the relay
+            // on stdout when the launch console/terminal buffers or pauses
+            // output while unfocused (common on Windows Terminal), stalling
+            // frame delivery to every viewer. Set EMULATOR_LOG=info (default)
+            // to disable these frame lines entirely, or verbose for a ~1/s
+            // throughput summary.
+            if (LEVELS.verbose < (LEVELS[LOG_INFO] || 0)) {
+                // verbose disabled → skip the accounting + log entirely.
+            } else {
+                const nowSec = now / 1000;
+                if (cons.__frameLogSec === undefined) cons.__frameLogSec = 0;
+                if (cons.__frameBytes === undefined) cons.__frameBytes = 0;
+                cons.__frameBytes += data.length;
+                if (nowSec - cons.__frameLogSec >= 1) {
+                    if (cons.__frameLogSec > 0) {
+                        logV(`host ${cons.key}: ≈${(cons.__frameBytes / 1000) | 0} KiB/s (once per second)`);
+                    }
+                    cons.__frameLogSec = nowSec;
+                    cons.__frameBytes = 0;
                 }
-                cons.__frameLogSec = nowSec;
-                cons.__frameBytes = 0;
             }
             broadcastBinary(cons, data);
             return;
