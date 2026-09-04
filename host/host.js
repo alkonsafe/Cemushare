@@ -323,7 +323,7 @@ async function startVideo(canvas) {
     // mean luminance; rows/cols that are essentially black are letterbox bars.
     // The game region is the bounding box of non-bar rows/cols. Across the probe
     // window we keep the LARGEST region seen (boot/title frames are mostly dark,
-    // gameplay fills more) and also log an ASCII thumbnail of the frame so we can
+    // gameplay fills more) and also dump an ASCII thumbnail of frame 1 so we can
     // tell exactly where the picture sits in the surface.
     function probeFrame(videoFrame) {
         const sx = videoFrame.displayWidth, sy = videoFrame.displayHeight;
@@ -370,7 +370,19 @@ async function startVideo(canvas) {
         return out;
     }
 
-    let outCanvas = null, outCtx = null, content = null, probes = 0;
+    function previewSurface(videoFrame) {
+        try {
+            const sx = videoFrame.displayWidth, sy = videoFrame.displayHeight;
+            const pw = 64, ph = Math.max(8, Math.round(pw * sy / sx));
+            const pc = document.createElement('canvas');
+            pc.width = pw; pc.height = ph;
+            const pctx = pc.getContext('2d', { willReadFrequently: true });
+            pctx.drawImage(videoFrame, 0, 0, pw, ph);
+            log('surface preview (' + sx + 'x' + sy + '):\n' + asciiArt(pctx, pw, ph));
+        } catch (err) { log('preview failed:', err && err.message); }
+    }
+
+    let outCanvas = null, outCtx = null, content = null, probes = 0, settled = 0, previewed = false, probed = false;
 
     // Pace encodes to real time so we never feed the encoder bursts. The
     // emulator redraws rAF's canvas continuously, but we only encode one frame
@@ -385,37 +397,35 @@ async function startVideo(canvas) {
         if (!videoEncoder || videoEncoder.state !== 'configured') { videoFrame.close(); continue; }
         const now = performance.now();
 
-        // First frames carry no game picture yet (black); keep sampling until we
-        // learn the content region, then freeze it (the canvas rarely moves).
-        if (!content && probes < 30) {
+        // First frames carry no game picture yet (black); keep sampling until the
+        // content region stops growing, then freeze it (canvas rarely moves).
+        if (!previewed) {
+            previewed = true;
+            previewSurface(videoFrame);
+        }
+        if (!probed) {           // still learning the content region
             probes++;
-            if (probes === 1) {
-                log(`surface ${videoFrame.displayWidth}x${videoFrame.displayHeight} ` +
-                    `(canvas ${config.width}x${config.height})`);
-            }
             const got = probeFrame(videoFrame);
             if (got) {
                 const big = !content || got.area > content.area;
                 if (big) {
                     content = got;
+                    settled = 0;
                     const cx = Math.round(got.x * got.sx), cy = Math.round(got.y * got.sy);
                     const cw = Math.max(1, Math.round(got.w * got.sx)), ch = Math.max(1, Math.round(got.h * got.sy));
                     log(`probe#${probes} region ${cx},${cy} ${cw}x${ch} (${(cw / ch).toFixed(2)}:1)`);
-                }
-                if (!got.previewed) {
-                    got.previewed = true;
-                    const pw = 64, ph = Math.max(8, Math.round(pw * got.sy / got.sx));
-                    const pc = document.createElement('canvas');
-                    pc.width = pw; pc.height = ph;
-                    const pctx = pc.getContext('2d', { willReadFrequently: true });
-                    pctx.drawImage(videoFrame, 0, 0, pw, ph);
-                    log('surface preview:\n' + asciiArt(pctx, pw, ph));
+                } else if (++settled >= 60) {
+                    // region stopped growing — gameplay likely fills the screen
+                    log('settled — probing done');
+                    probed = true;
                 }
             }
-            // Nothing bright enough yet — keep the giant surface as-is.
-            if (probes >= 30 && !content) {
-                content = { x: 0, y: 0, w: 1, h: 1, area: 1 };
-                log('no content after 30 probes — using full surface');
+            if (probes >= 900) {   // ~30s of nothing — take the whole surface
+                if (!content) {
+                    content = { x: 0, y: 0, w: 1, h: 1, area: 1 };
+                    log('no content after probing — using full surface');
+                }
+                probed = true;
             }
         }
 
