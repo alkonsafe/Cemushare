@@ -96,33 +96,20 @@
     // Catch EVERY attribute change on the canvas regardless of how it was
     // written (property setter vs setAttribute) — host.js's prototype cap only
     // intercepts the property path, so a 1920x270 along a different path would
-    // slip through invisibly. Attribute filter: width, height, style.
-    const PIN_W = 320, PIN_H = 240; // game's native surface (known-good boot state)
-    let correcting = false;
+    // slip through invisibly. Here it is LOG-ONLY; the actual correction uses
+    // Module.setCanvasSize (below) so the game's resize listeners fire and it
+    // re-renders to fill the new surface instead of clipping into a corner.
     const attrWatch = new MutationObserver((muts) => {
       for (const m of muts) {
         const oldV = m.oldValue || '';
         const newV = c.getAttribute(m.attributeName) || '';
-        const was = Math.round(performance.now());
         console.log('[m64] attr-changed', m.attributeName,
-          'old=(' + oldV + ')', 'new=(' + newV + ')', 't=' + was + 'ms');
+          'old=(' + oldV + ')', 'new=(' + newV + ')',
+          't=' + Math.round(performance.now()) + 'ms');
         if (m.attributeName === 'width' || m.attributeName === 'height') {
           const r = c.getBoundingClientRect();
           console.log('[m64]   after:', 'attr=', c.width + 'x' + c.height,
             'rect=', Math.round(r.width) + 'x' + Math.round(r.height));
-          if (!correcting) {
-            correcting = true;
-            try {
-              if (c.getAttribute('width') !== String(PIN_W)) {
-                c.setAttribute('width', String(PIN_W));
-                console.log('[m64]   -> forced width to', PIN_W);
-              }
-              if (c.getAttribute('height') !== String(PIN_H)) {
-                c.setAttribute('height', String(PIN_H));
-                console.log('[m64]   -> forced height to', PIN_H);
-              }
-            } finally { correcting = false; }
-          }
         }
       }
     });
@@ -131,6 +118,35 @@
         attributeFilter: ['width', 'height', 'style'] });
     } catch (e) { console.error('[m64] attrWatch failed:', e); }
     for (const ms of [200, 500, 1000, 2000, 3500]) setTimeout(() => snap('t+' + ms), ms);
+
+    // ── Size watchdog ──────────────────────────────────────────────────────
+    // The game boots its canvas at 320x240, then during init grows it to
+    // 1920x270 (a mismatch it computes itself). At 1920x270 the picture is a
+    // stretched horizontal strip; if we only shrink the canvas ATTRIBUTES the
+    // game still renders at its own size and we see a zoomed corner. So re-drive
+    // its own resize API (setCanvasSize -> updateCanvasDimensions +
+    // updateResizeListeners) to 480x360 (4:3) so the emulator re-renders to
+    // fill the surface. host.js's cap setter also allows 480x360 (aspect kept,
+    // MAX_DIM=480).
+    const PIN_W = 480, PIN_H = 360;
+    let correcting = false;
+    function correctSize() {
+      const M = window.Module;
+      if (!M || typeof M.setCanvasSize !== 'function') return;
+      if (correcting) return;
+      if (c.width === PIN_W && c.height === PIN_H) return;
+      correcting = true;
+      try {
+        console.log('[m64] setCanvasSize(' + PIN_W + ',' + PIN_H + ') ' +
+          'from attr ' + c.width + 'x' + c.height);
+        M.setCanvasSize(PIN_W, PIN_H);
+      } catch (err) { console.error('[m64] setCanvasSize failed:', err); }
+      finally { correcting = false; }
+    }
+    setInterval(correctSize, 100);
+    setTimeout(correctSize, 400);
+    setTimeout(correctSize, 1000);
+    setTimeout(correctSize, 2000);
     const wrapOnce = setInterval(() => {
       const M = window.Module;
       if (M && typeof M.setCanvasSize === 'function' && !M.setCanvasSize.__wrapped) {
