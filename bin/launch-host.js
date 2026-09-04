@@ -287,7 +287,7 @@ async function main() {
     // separate GPU process to crash. On Windows keep ANGLE+SwiftShader.
     const glFlags = process.platform === 'linux'
         ? [
-            '--use-gl=egl',
+            '--use-gl=angle',
             '--use-angle=swiftshader',
             '--enable-unsafe-swiftshader',
             '--in-process-gpu',
