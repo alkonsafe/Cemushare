@@ -111,12 +111,6 @@ window.cancelAnimationFrame = (id) => {
     }
 };
 
-// The headless compositor's capture surface for a WebGL canvas is DPR-driven
-// (mario64's 320x240 backing surfaces as 1920x270, window-width x4 / x1), and
-// --force-device-scale-factor=1 does not stop it. Pin devicePixelRatio to 1 so
-// games that size from it (and Chromium's canvas layer allocation) stay sane.
-try { Object.defineProperty(window, 'devicePixelRatio', { get: () => 1, configurable: true }); } catch (e) {}
-
 // Keep the page reporting as visible so Emscripten stays in its active fast path
 // and does not self-pause its main loop when the window loses focus.
 try {
@@ -143,16 +137,6 @@ for (const prop of ['width', 'height']) {
                 const s = Math.min(1, MAX_DIM / Math.max(sdlW, sdlH));
                 renderW = Math.max(1, Math.round(sdlW * s));
                 renderH = Math.max(1, Math.round(sdlH * s));
-                // Pin the CSS size to the capped backing size too. Headless
-                // SwiftShader composites the canvas at a DPR-distorted surface
-                // (mario64's 320x240 backing was captured as 1920x270, cutting
-                // off the top of the picture); --force-device-scale-factor=1
-                // does NOT stop captureStream. Pin style.width/height so the
-                // compositor + capture surface == the backing store.
-                if (this.parentNode) {
-                    this.style.width = renderW + 'px';
-                    this.style.height = renderH + 'px';
-                }
                 return desc.set.call(this, prop === 'width' ? renderW : renderH);
             }
             return desc.set.call(this, v);
@@ -311,79 +295,6 @@ async function startVideo(canvas) {
     if (!track.requestFrame) { log('FATAL: track has no requestFrame() — manual capture unsupported'); return; }
     const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
 
-    // DECOUPLED ENCODE: the headless compositor's capture surface is DPR-driven
-    // and NOT the canvas's logical size (mario64's 320x240 backing surfaced as
-    // 1920x270). Rather than reconfigure the encoder to whatever strip we get,
-    // we rasterize every frame into a fixed 320x240 offscreen canvas, mapping a
-    // detected content region onto it. The wire stays a clean 4:3 stream and
-    // the viewer box (w-[720px] h-[550px]) always shows the whole picture.
-
-    // ── content-probe: where the real game picture lives in the surface ───────
-    // Sample the first frames at low res. For each frame, compute per-row/per-col
-    // mean luminance; rows/cols that are essentially black are letterbox bars.
-    // The game region is the bounding box of non-bar rows/cols. Across the probe
-    // window we keep the LARGEST region seen (boot/title frames are mostly dark,
-    // gameplay fills more) and also dump an ASCII thumbnail of frame 1 so we can
-    // tell exactly where the picture sits in the surface.
-    function probeFrame(videoFrame) {
-        const sx = videoFrame.displayWidth, sy = videoFrame.displayHeight;
-        const pw = 64, ph = Math.max(8, Math.round(pw * sy / sx));
-        const pc = document.createElement('canvas');
-        pc.width = pw; pc.height = ph;
-        const pctx = pc.getContext('2d', { willReadFrequently: true });
-        pctx.drawImage(videoFrame, 0, 0, pw, ph);
-        const data = pctx.getImageData(0, 0, pw, ph).data;
-        const rowL = new Float32Array(ph), colL = new Float32Array(pw);
-        for (let y = 0; y < ph; y++) {
-            for (let x = 0; x < pw; x++) {
-                const i = (y * pw + x) * 4;
-                const lum = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-                rowL[y] += lum; colL[x] += lum;
-            }
-        }
-        const rowA = rowL.map(v => v / pw), colA = colL.map(v => v / ph);
-        const rMax = Math.max(...rowA), cMax = Math.max(...colA);
-        const rt = Math.max(4, rMax * 0.03), ct = Math.max(4, cMax * 0.03);
-        let y0 = ph; while (y0 > 0 && rowA[y0 - 1] <= rt) y0--;
-        let y1 = -1; for (let y = 0; y < ph; y++) if (rowA[y] > rt) y1 = y;
-        let x0 = pw; while (x0 > 0 && colA[x0 - 1] <= ct) x0--;
-        let x1 = -1; for (let x = 0; x < pw; x++) if (colA[x] > ct) x1 = x;
-        if (x1 < x0 || y1 < y0) return null;
-        const s = 1 / pw;
-        return { x: x0 * s, y: y0 * s, w: (x1 - x0 + 1) * s, h: (y1 - y0 + 1) * s,
-                 sx, sy, area: (x1 - x0 + 1) * (y1 - y0 + 1) };
-    }
-
-    // ASCII thumbnail: '.' dark, 'o' mid, '#' bright.
-    function asciiArt(pctx, pw, ph) {
-        const data = pctx.getImageData(0, 0, pw, ph).data;
-        let out = '';
-        for (let y = 0; y < ph; y++) {
-            let line = '';
-            for (let x = 0; x < pw; x++) {
-                const i = (y * pw + x) * 4;
-                const lum = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-                line += lum < 12 ? '.' : lum < 80 ? 'o' : '#';
-            }
-            out += line + '\n';
-        }
-        return out;
-    }
-
-    function previewSurface(videoFrame) {
-        try {
-            const sx = videoFrame.displayWidth, sy = videoFrame.displayHeight;
-            const pw = 64, ph = Math.max(8, Math.round(pw * sy / sx));
-            const pc = document.createElement('canvas');
-            pc.width = pw; pc.height = ph;
-            const pctx = pc.getContext('2d', { willReadFrequently: true });
-            pctx.drawImage(videoFrame, 0, 0, pw, ph);
-            log('surface preview (' + sx + 'x' + sy + '):\n' + asciiArt(pctx, pw, ph));
-        } catch (err) { log('preview failed:', err && err.message); }
-    }
-
-    let outCanvas = null, outCtx = null, content = null, probes = 0, settled = 0, previewed = false, probed = false;
-
     // Pace encodes to real time so we never feed the encoder bursts. The
     // emulator redraws rAF's canvas continuously, but we only encode one frame
     // per 1/FPS interval and drop the rest, keeping the wire a steady 30fps.
@@ -395,71 +306,28 @@ async function startVideo(canvas) {
         const { value: videoFrame, done } = await reader.read();
         if (done) break;
         if (!videoEncoder || videoEncoder.state !== 'configured') { videoFrame.close(); continue; }
+        if (videoEncoder.encodeQueueSize > 2) { videoFrame.close(); continue; }
+        if (videoFrame.displayWidth !== config.width || videoFrame.displayHeight !== config.height) {
+            log(`canvas resized to ${videoFrame.displayWidth}x${videoFrame.displayHeight} — reconfiguring`);
+            videoFrame.close();
+            try { reader.cancel(); } catch {}
+            try { videoEncoder.close(); } catch {}
+            videoEncoder = null; sentVideoConfig = false;
+            startVideo(canvas);
+            return;
+        }
         const now = performance.now();
-
-        // First frames carry no game picture yet (black); keep sampling until the
-        // content region stops growing, then freeze it (canvas rarely moves).
-        if (!previewed) {
-            previewed = true;
-            previewSurface(videoFrame);
-        }
-        if (!probed) {           // still learning the content region
-            probes++;
-            const got = probeFrame(videoFrame);
-            if (got) {
-                const big = !content || got.area > content.area;
-                if (big) {
-                    content = got;
-                    settled = 0;
-                    const cx = Math.round(got.x * got.sx), cy = Math.round(got.y * got.sy);
-                    const cw = Math.max(1, Math.round(got.w * got.sx)), ch = Math.max(1, Math.round(got.h * got.sy));
-                    log(`probe#${probes} region ${cx},${cy} ${cw}x${ch} (${(cw / ch).toFixed(2)}:1)`);
-                } else if (++settled >= 60) {
-                    // region stopped growing — gameplay likely fills the screen
-                    log('settled — probing done');
-                    probed = true;
-                }
-            }
-            if (probes >= 900) {   // ~30s of nothing — take the whole surface
-                if (!content) {
-                    content = { x: 0, y: 0, w: 1, h: 1, area: 1 };
-                    log('no content after probing — using full surface');
-                }
-                probed = true;
-            }
-        }
-
-        // Rasterize into the fixed-size out canvas.
-        if (!outCanvas) {
-            outCanvas = document.createElement('canvas');
-            outCanvas.width = config.width; outCanvas.height = config.height;
-            outCtx = outCanvas.getContext('2d', { willReadFrequently: true });
-        }
-        const fw = videoFrame.displayWidth, fh = videoFrame.displayHeight;
-        outCtx.fillStyle = '#000';
-        outCtx.fillRect(0, 0, outCanvas.width, outCanvas.height);
-        const c = content || { x: 0, y: 0, w: 1, h: 1 };
-        const srcX = Math.round(c.x * fw), srcY = Math.round(c.y * fh);
-        const srcW = Math.max(1, Math.round(c.w * fw)), srcH = Math.max(1, Math.round(c.h * fh));
-        const scale = Math.min(outCanvas.width / srcW, outCanvas.height / srcH);
-        const dw = srcW * scale, dh = srcH * scale;
-        outCtx.drawImage(videoFrame, srcX, srcY, srcW, srcH,
-            (outCanvas.width - dw) / 2, (outCanvas.height - dh) / 2, dw, dh);
-        const outFrame = new VideoFrame(outCanvas, { timestamp: Math.round(now * 1000) });
-        videoFrame.close();
-
-        if (videoEncoder.encodeQueueSize > 2) { outFrame.close(); continue; }
-        if (now - lastEncodeAt < frameMs) { outFrame.close(); continue; }
+        if (now - lastEncodeAt < frameMs) { videoFrame.close(); continue; }
         lastEncodeAt = now;
         const key = wantKeyframe || (n++ % (FPS * 2) === 0);
         wantKeyframe = false;
         // VideoEncoder requires monotonically increasing chunk timestamps.
         // requestFrame()'s own timestamps can be unreliable (zero / dupes), so
         // stamp the frame explicitly with our encode clock (µs).
-        const stamped = new VideoFrame(outFrame, { timestamp: Math.round(lastEncodeAt * 1000) });
+        const stamped = new VideoFrame(videoFrame, { timestamp: Math.round(lastEncodeAt * 1000) });
         try { videoEncoder.encode(stamped, { keyFrame: key }); } catch (err) { log('encode failed', err.message); }
         stamped.close();
-        outFrame.close();
+        videoFrame.close();
     }
 }
 
