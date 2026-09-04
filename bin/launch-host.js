@@ -165,10 +165,21 @@ function resolveConsoleDir() {
 
 // ── Boot the local static server for the console ─────────────────────────────
 function startStaticServer(dir, key) {
+    // Use 'pipe' instead of 'inherit' so the static server is not placed in the
+    // same Windows console job object as this Node process. 'inherit' shares the
+    // actual stdio handles, which is enough for Windows to link both processes
+    // into one job — minimising the console window then throttles the whole job.
+    // We forward the output manually via data handlers to keep log visibility.
     const child = spawn(process.execPath, [path.join(ROOT, 'host', 'serve-host.js')], {
         env: { ...process.env, HOST_STATIC_PORT: String(localPort), CONSOLE_KEY: key, CONSOLE_DIR: dir },
-        stdio: ['ignore', 'inherit', 'inherit'],
+        stdio: ['ignore', 'pipe', 'pipe'],
+        detached: true,
+        windowsHide: true,
     });
+    child.stdout.on('data', (chunk) => process.stdout.write(chunk));
+    child.stderr.on('data', (chunk) => process.stderr.write(chunk));
+    child.unref();
+    setHighPriority(child);
     return child;
 }
 
@@ -188,6 +199,23 @@ function waitFor(host, port) {
 function stopChildren(children) {
     for (const c of children) try { c.kill(); } catch {}
     process.exit(0);
+}
+
+// ── Raise a child process to high/realtime priority ──────────────────────────
+// On Windows we use PowerShell's Get-Process | Set-PriorityClass because it
+// works without extra npm deps and survives UAC. "High" (not "RealTime") is
+// recommended — RealTime can starve system threads and cause system lockups.
+// On Linux we attempt renice -n -10 (requires CAP_SYS_NICE or sudo).
+function setHighPriority(child) {
+    if (!child || !child.pid) return;
+    if (process.platform === 'win32') {
+        spawnSync('powershell', [
+            '-NoProfile', '-NonInteractive', '-Command',
+            `(Get-Process -Id ${child.pid} -ErrorAction SilentlyContinue)?.PriorityClass = 'High'`,
+        ], { stdio: 'ignore', windowsHide: true });
+    } else {
+        spawnSync('renice', ['-n', '-10', '-p', String(child.pid)], { stdio: 'ignore' });
+    }
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────
@@ -252,7 +280,22 @@ async function main() {
     // Match the proven arena flag set (mario64 renders correctly with it):
     // --use-gl=angle --use-angle=swiftshader on every platform. Only vary on
     // platforms we can't auto-detect here; keep it identical to arena.
-    const glFlags = ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'];
+    // GL backend: SwiftShader via ANGLE works on Windows but its GPU process
+    // segfaults (exit code 11) on headless Linux under the Puppeteer-bundled
+    // Chrome due to sandbox + /dev/shm constraints. On Linux use --in-process-gpu
+    // with EGL/SwiftShader so GL runs inside the renderer process with no
+    // separate GPU process to crash. On Windows keep ANGLE+SwiftShader.
+    const glFlags = process.platform === 'linux'
+        ? [
+            '--use-gl=egl',
+            '--use-angle=swiftshader',
+            '--enable-unsafe-swiftshader',
+            '--in-process-gpu',
+            '--gpu-sandbox-failures-fatal=no',
+            '--ignore-gpu-blocklist',
+            '--disable-gpu-sandbox',
+          ]
+        : ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'];
 
     // With no DISPLAY on Linux, run Chromium under Xvfb so its GPU/WebGL
     // process has a backend to talk to.
@@ -272,7 +315,13 @@ async function main() {
         // reports the headless host window as "occluded" when the viewer window
         // takes focus, which throttles rAF/MediaStream and slows the emulator
         // (game + audio stutter). This is the flag that actually stops that.
-        '--disable-features=CalculateNativeWinOcclusion',
+        '--disable-features=CalculateNativeWinOcclusion,OptOutZeroTimeoutTimersFromThrottling,IntensiveWakeUpThrottling',
+        // Prevent the browser from throttling background pages / timers when
+        // the console window loses focus. IntensiveWakeUpThrottling (Chrome 86+)
+        // collapses JS timers to ≥1-minute intervals in background tabs;
+        // disabling it keeps rAF and setTimeout running at full rate even when
+        // the Node console window is unfocused.
+        '--disable-ipc-flooding-protection',
         // Force 1:1 CSS→device pixels. Headless SwiftShader sometimes reports a
         // backing surface scaled by DPR (mario64 captured as 1920x270 = 480x270
         // × 4 on width only instead of its real 320x240), which made the whole
@@ -286,6 +335,37 @@ async function main() {
         '--hide-scrollbars',
         '--disable-gpu-vsync',
         '--disable-frame-rate-limit',
+        // Keep the renderer process alive and unthrottled when the host OS
+        // considers the window background / unfocused.
+        '--disable-hang-monitor',
+        '--run-all-compositor-stages-before-draw',
+
+        // ── Performance ───────────────────────────────────────────────────────
+        // Skip first-run and extensions overhead.
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-extensions',
+        '--disable-plugins',
+        // Disable features that burn CPU/memory with no benefit for a headless
+        // emulator host: translation prompts, spell-check, accessibility tree,
+        // print preview, sync, crash reporting.
+        '--disable-features=TranslateUI,AutofillServerCommunication,MediaRouter,DialMediaRouteProvider',
+        '--disable-translate',
+        '--disable-spell-checking',
+        '--disable-accessibility-service',
+        '--disable-print-preview',
+        '--disable-sync',
+        '--disable-breakpad',
+        // Reduce memory pressure: one renderer process, no extra JIT scaffolding.
+        '--process-per-site',
+        '--js-flags=--max-old-space-size=512',
+        // Reduce compositor overhead: skip image decode on non-visible layers,
+        // use a single raster thread (the emulator canvas is a single GL surface).
+        '--disable-lcd-text',
+        '--num-raster-threads=1',
+        // Skip network services unused in a local-only static server setup.
+        '--disable-domain-reliability',
+        '--no-pings',
         `--window-size=${w},${h}`,
         `--user-data-dir=${profileDir}`,
         '--enable-logging=stderr',
@@ -293,9 +373,34 @@ async function main() {
         hostUrl,
     ];
 
+    // Detach Chromium from the Node console process entirely. If Chromium
+    // inherits the console (stdio:'inherit') Windows places both processes in
+    // the same console job-object. Minimising or covering the console window
+    // then causes Windows to throttle the whole job — including Chromium —
+    // even though Chromium's own window is headless and never visible.
+    // Spawning detached with its own pipe stdio breaks that job-object link
+    // so the console window's visibility has no effect on Chromium's scheduler
+    // priority. windowsHide:true suppresses any flash of a new console window
+    // on Windows. We pipe stderr so we still get Chromium log lines.
+    fs.mkdirSync(path.join(ROOT, 'data'), { recursive: true });
+    const browserLog = fs.createWriteStream(path.join(ROOT, 'data', 'chromium.log'), { flags: 'a' });
     const browser = spawn(xvfb ? 'xvfb-run' : chromium,
         xvfb ? [...xvfb, chromium, ...browserArgs] : browserArgs,
-        { stdio: ['ignore', 'inherit', 'inherit'] });
+        {
+            stdio: ['ignore', 'pipe', 'pipe'],
+            detached: true,
+            windowsHide: true,
+        });
+    setHighPriority(browser);
+    browser.stdout.pipe(browserLog);
+    // Pipe stderr to the log file instead of process.stderr. Piping directly
+    // to process.stderr re-links Chromium into the Node console's job object on
+    // Windows, so minimising the console window throttles Chromium's scheduler
+    // priority even though its own window is headless. Writing via a 'data'
+    // handler avoids that job-object link while still showing logs in the console.
+    browser.stderr.pipe(browserLog);
+    browser.stderr.on('data', (chunk) => process.stderr.write(chunk));
+    browser.unref();
 
     console.log('[host] console running. Ctrl+C to stop.');
     console.log(`[host] stream available at ${relay.replace(/^ws/, 'http')}/ once two+ viewers join.`);

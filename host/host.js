@@ -56,28 +56,61 @@ function pinLive(obj, prop, fn) {
 
 // ── UN-THROTTLE THE EMULATOR LOOP ─────────────────────────────────────────────
 // The host is driven by an Emscripten loop that ticks on requestAnimationFrame.
-// Chromium throttles requestAnimationFrame (and delivery) when the page/window
-// is backgrounded or occluded — e.g. the moment you focus/unfocus the launch
-// window — which makes BOTH the game AND audio stutter even with
-// --disable-background-timer-throttling (that flag does NOT cover rAF). To make
-// the loop occlusion-proof we fall back to a timer when the page reports hidden,
-// since timers ARE exempted by that launch flag.
+// Chromium throttles rAF when the page/window is backgrounded or occluded, and
+// --disable-background-timer-throttling does NOT cover rAF. setTimeout is also
+// unreliable: Windows raises the minimum timer resolution back to ~15.6 ms when
+// a console window is minimized, so a 4 ms setTimeout fires at 15.6 ms and the
+// game runs at ~30% speed.
+//
+// The fix is a Web Worker timer. Worker postMessage callbacks are NOT subject to
+// either rAF throttling or the Windows timer-resolution clamp — they fire at the
+// requested interval regardless of window focus, minimize, or occlusion state.
 const nativeRAF = window.requestAnimationFrame.bind(window);
 const nativeCAF = window.cancelAnimationFrame.bind(window);
-const timeoutHandles = new Map();
-// Drive the loop on a short timer instead of rAF. rAF is throttled by Chromium
-// when the page/window is occluded/backgrounded (focusing/unfocusing the launch
-// window), which stalls the emulator and audio. Timers are exempt via the
-// launcher's --disable-background-timer-throttling.
+
+// Spin up an inline Worker that drives a tight setInterval and posts back tick IDs.
+const _workerBlob = new Blob([`
+    const pending = new Map();
+    let uid = 1;
+    self.onmessage = (e) => {
+        const { op, id, ms } = e.data;
+        if (op === 'set') {
+            const h = setInterval(() => { self.postMessage({ id }); }, ms);
+            pending.set(id, h);
+        } else if (op === 'clear') {
+            const h = pending.get(id);
+            if (h !== undefined) { clearInterval(h); pending.delete(id); }
+        }
+    };
+`], { type: 'text/javascript' });
+const _rafWorker = new Worker(URL.createObjectURL(_workerBlob));
+
+const _rafCallbacks = new Map();
+let _rafIdCounter = 1;
+
+_rafWorker.onmessage = (e) => {
+    const cb = _rafCallbacks.get(e.data.id);
+    if (!cb) return;
+    _rafCallbacks.delete(e.data.id);
+    _rafWorker.postMessage({ op: 'clear', id: e.data.id });
+    try { cb(performance.now()); } catch (_) {}
+};
+
 window.requestAnimationFrame = (cb) => {
-    const id = window.setTimeout(() => { timeoutHandles.delete(id); try { cb(performance.now()); } catch (e) {} }, 4);
-    timeoutHandles.set(id, true);
+    const id = _rafIdCounter++;
+    _rafCallbacks.set(id, cb);
+    // 4 ms interval in the Worker fires reliably regardless of window state.
+    _rafWorker.postMessage({ op: 'set', id, ms: 4 });
     return id;
 };
 window.cancelAnimationFrame = (id) => {
-    if (timeoutHandles.delete(id)) { try { window.clearTimeout(id); } catch (e) {} }
-    else { try { nativeCAF(id); } catch (e) {} }
+    if (_rafCallbacks.delete(id)) {
+        _rafWorker.postMessage({ op: 'clear', id });
+    } else {
+        try { nativeCAF(id); } catch (_) {}
+    }
 };
+
 // Keep the page reporting as visible so Emscripten stays in its active fast path
 // and does not self-pause its main loop when the window loses focus.
 try {
