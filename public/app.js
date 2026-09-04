@@ -671,11 +671,11 @@ async function configureVideo(config) {
     }
 
     __decoderOutputFn = (videoFrame) => {
+        // NO per-frame console.log here: console output is slow, and logging on
+        // every N frames is throttled/serialized when the viewer tab is
+        // backgrounded, which stalls the decode→draw pipeline → visible lag.
         if (window.__dbgOutput === undefined) window.__dbgOutput = 0;
         window.__dbgOutput++;
-        if (window.__dbgOutput <= 3 || window.__dbgOutput % 25 === 0) {
-            console.log('[decoder OUTPUT]', videoFrame.displayWidth, 'x', videoFrame.displayHeight, 'count=', window.__dbgOutput);
-        }
         try {
             if (canvas.width !== videoFrame.displayWidth || canvas.height !== videoFrame.displayHeight) {
                 canvas.width = videoFrame.displayWidth;
