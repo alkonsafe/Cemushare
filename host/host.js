@@ -285,21 +285,24 @@ async function startVideo(canvas) {
     });
     videoEncoder.configure(config);
 
-    const stream = canvas.captureStream(FPS);
+    // MANUAL capture: captureStream(0) disables auto-capture (which carries
+    // Chrome's built-in camera-style sampling latency) and instead we pull a
+    // frame on demand with track.requestFrame() left at the newest canvas
+    // render. This is the lowest-latency way to get pixels out of a canvas.
+    const stream = canvas.captureStream(0);
     const track = stream.getVideoTracks()[0];
     if (!track) { log('FATAL: canvas produced no video track'); return; }
+    if (!track.requestFrame) { log('FATAL: track has no requestFrame() — manual capture unsupported'); return; }
     const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
 
-    // Pace encodes to real time. captureStream emits on every canvas redraw
-    // (the emulator drives rAF at up to 250fps via the worker timer), which
-    // would otherwise push arbitrarily many frames into the encoder → encode
-    // backlog → bursty wire delivery → the viewer's decode queue sees bursts
-    // and staggers. Always drain the reader (so frames don't pile up inside
-    // the track), but only encode when a full frame interval has elapsed.
+    // Pace encodes to real time so we never feed the encoder bursts. The
+    // emulator redraws rAF's canvas continuously, but we only encode one frame
+    // per 1/FPS interval and drop the rest, keeping the wire a steady 30fps.
     const frameMs = 1000 / FPS;
     let lastEncodeAt = 0;
     let n = 0;
     for (;;) {
+        track.requestFrame();               // capture the newest canvas pixels now
         const { value: videoFrame, done } = await reader.read();
         if (done) break;
         if (!videoEncoder || videoEncoder.state !== 'configured') { videoFrame.close(); continue; }
@@ -318,7 +321,12 @@ async function startVideo(canvas) {
         lastEncodeAt = now;
         const key = wantKeyframe || (n++ % (FPS * 2) === 0);
         wantKeyframe = false;
-        try { videoEncoder.encode(videoFrame, { keyFrame: key }); } catch (err) { log('encode failed', err.message); }
+        // VideoEncoder requires monotonically increasing chunk timestamps.
+        // requestFrame()'s own timestamps can be unreliable (zero / dupes), so
+        // stamp the frame explicitly with our encode clock (µs).
+        const stamped = new VideoFrame(videoFrame, { timestamp: Math.round(lastEncodeAt * 1000) });
+        try { videoEncoder.encode(stamped, { keyFrame: key }); } catch (err) { log('encode failed', err.message); }
+        stamped.close();
         videoFrame.close();
     }
 }
