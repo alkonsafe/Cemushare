@@ -137,6 +137,16 @@ for (const prop of ['width', 'height']) {
                 const s = Math.min(1, MAX_DIM / Math.max(sdlW, sdlH));
                 renderW = Math.max(1, Math.round(sdlW * s));
                 renderH = Math.max(1, Math.round(sdlH * s));
+                // Pin the CSS size to the capped backing size too. Headless
+                // SwiftShader composites the canvas at a DPR-distorted surface
+                // (mario64's 320x240 backing was captured as 1920x270, cutting
+                // off the top of the picture); --force-device-scale-factor=1
+                // does NOT stop captureStream. Pin style.width/height so the
+                // compositor + capture surface == the backing store.
+                if (this.parentNode) {
+                    this.style.width = renderW + 'px';
+                    this.style.height = renderH + 'px';
+                }
                 return desc.set.call(this, prop === 'width' ? renderW : renderH);
             }
             return desc.set.call(this, v);
