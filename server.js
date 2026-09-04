@@ -442,7 +442,21 @@ function attachHost(ws, consoleParam) {
                 sawFirstFrame = true;
                 log(`host "${cons.name}" (${cons.key}): READY — streaming video to viewers`);
             }
-            logV(`host ${cons.key}: frame kind=${kind} bytes=${data.length}`);
+            // Rate-limit the per-frame summary: logging on EVERY frame makes the
+            // relay block on stdout (Windows Terminal pauses/buffers console
+            // output while its window is unfocused), which stalls frame delivery
+            // to every viewer. Aggregate instead, ~once per second.
+            const nowSec = now / 1000;
+            if (cons.__frameLogSec === undefined) cons.__frameLogSec = 0;
+            if (cons.__frameBytes === undefined) cons.__frameBytes = 0;
+            cons.__frameBytes += data.length;
+            if (nowSec - cons.__frameLogSec >= 1) {
+                if (cons.__frameLogSec > 0) {
+                    logV(`host ${cons.key}: frames≈${(cons.__frameBytes / 1000) | 0} KiB/s (rate-limited)`);
+                }
+                cons.__frameLogSec = nowSec;
+                cons.__frameBytes = 0;
+            }
             broadcastBinary(cons, data);
             return;
         }
