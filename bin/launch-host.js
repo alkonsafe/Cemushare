@@ -25,6 +25,26 @@ const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '..');
 
+// ── .env autoload ────────────────────────────────────────────────────────────
+(function loadDotEnv() {
+    const file = path.join(ROOT, '.env');
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { return; }
+    for (let raw of text.split(/\r?\n/)) {
+        raw = raw.trim();
+        if (!raw || raw.startsWith('#')) continue;
+        const eq = raw.indexOf('=');
+        if (eq <= 0) continue;
+        let key = raw.slice(0, eq).trim();
+        let val = raw.slice(eq + 1).trim();
+        if (key.startsWith('export ')) key = key.slice(7).trim();
+        if (!key) continue;
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
+            val = val.slice(1, -1);
+        if (process.env[key] === undefined) process.env[key] = val;
+    }
+})();
+
 // ── CLI + env config ─────────────────────────────────────────────────────────
 function arg(name, def, altEnv) {
     if (process.env[altEnv]) return process.env[altEnv];

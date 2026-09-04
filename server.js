@@ -29,6 +29,29 @@ const crypto = require('crypto');
 const Database = require('better-sqlite3');
 const { WebSocketServer } = require('ws');
 
+// ── .env autoload ────────────────────────────────────────────────────────────
+// Load `key=value` pairs from the project root .env into process.env, WITHOUT
+// overriding variables that were already set (a real environment takes
+// precedence). Supports # comments, blank lines, and simple `VAR=value`.
+(function loadDotEnv() {
+    const file = path.join(__dirname, '.env');
+    let text;
+    try { text = fs.readFileSync(file, 'utf8'); } catch { return; }
+    for (let raw of text.split(/\r?\n/)) {
+        raw = raw.trim();
+        if (!raw || raw.startsWith('#')) continue;
+        const eq = raw.indexOf('=');
+        if (eq <= 0) continue;
+        let key = raw.slice(0, eq).trim();
+        let val = raw.slice(eq + 1).trim();
+        if (key.startsWith('export ')) key = key.slice(7).trim();
+        if (!key) continue;
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'")))
+            val = val.slice(1, -1);
+        if (process.env[key] === undefined) process.env[key] = val;
+    }
+})();
+
 const PORT         = Number(process.env.EMULATOR_PORT || 8090);
 const PUBLIC_DIR   = path.join(__dirname, 'public');
 const DATA_DIR     = path.join(__dirname, 'data');
