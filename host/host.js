@@ -319,36 +319,58 @@ async function startVideo(canvas) {
     // the viewer box (w-[720px] h-[550px]) always shows the whole picture.
 
     // ── content-probe: where the real game picture lives in the surface ───────
-    // Sample the first frame(s) at low res, find the bounding box of pixels
-    // brighter than pure-black, and treat that as the game's picture. Frames
-    // with a 4:3-ish region map through crop+scale; strips that fill the whole
-    // surface map through plain aspect-fit.
-    function findContent(videoFrame) {
-        const pw = 64, ph = 36;
+    // Sample the first frames at low res. For each frame, compute per-row/per-col
+    // mean luminance; rows/cols that are essentially black are letterbox bars.
+    // The game region is the bounding box of non-bar rows/cols. Across the probe
+    // window we keep the LARGEST region seen (boot/title frames are mostly dark,
+    // gameplay fills more) and also log an ASCII thumbnail of the frame so we can
+    // tell exactly where the picture sits in the surface.
+    function probeFrame(videoFrame) {
+        const sx = videoFrame.displayWidth, sy = videoFrame.displayHeight;
+        const pw = 64, ph = Math.max(8, Math.round(pw * sy / sx));
         const pc = document.createElement('canvas');
         pc.width = pw; pc.height = ph;
         const pctx = pc.getContext('2d', { willReadFrequently: true });
         pctx.drawImage(videoFrame, 0, 0, pw, ph);
         const data = pctx.getImageData(0, 0, pw, ph).data;
-        const thresh = 8;
-        let x0 = pw, y0 = ph, x1 = -1, y1 = -1;
+        const rowL = new Float32Array(ph), colL = new Float32Array(pw);
         for (let y = 0; y < ph; y++) {
             for (let x = 0; x < pw; x++) {
                 const i = (y * pw + x) * 4;
                 const lum = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
-                if (lum > thresh) {
-                    if (x < x0) x0 = x; if (x > x1) x1 = x;
-                    if (y < y0) y0 = y; if (y > y1) y1 = y;
-                }
+                rowL[y] += lum; colL[x] += lum;
             }
         }
+        const rowA = rowL.map(v => v / pw), colA = colL.map(v => v / ph);
+        const rMax = Math.max(...rowA), cMax = Math.max(...colA);
+        const rt = Math.max(4, rMax * 0.03), ct = Math.max(4, cMax * 0.03);
+        let y0 = ph; while (y0 > 0 && rowA[y0 - 1] <= rt) y0--;
+        let y1 = -1; for (let y = 0; y < ph; y++) if (rowA[y] > rt) y1 = y;
+        let x0 = pw; while (x0 > 0 && colA[x0 - 1] <= ct) x0--;
+        let x1 = -1; for (let x = 0; x < pw; x++) if (colA[x] > ct) x1 = x;
         if (x1 < x0 || y1 < y0) return null;
         const s = 1 / pw;
         return { x: x0 * s, y: y0 * s, w: (x1 - x0 + 1) * s, h: (y1 - y0 + 1) * s,
-                 sx: videoFrame.displayWidth, sy: videoFrame.displayHeight };
+                 sx, sy, area: (x1 - x0 + 1) * (y1 - y0 + 1) };
     }
 
-    let outCanvas = null, outCtx = null, content = null, probed = 0;
+    // ASCII thumbnail: '.' dark, 'o' mid, '#' bright.
+    function asciiArt(pctx, pw, ph) {
+        const data = pctx.getImageData(0, 0, pw, ph).data;
+        let out = '';
+        for (let y = 0; y < ph; y++) {
+            let line = '';
+            for (let x = 0; x < pw; x++) {
+                const i = (y * pw + x) * 4;
+                const lum = 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2];
+                line += lum < 12 ? '.' : lum < 80 ? 'o' : '#';
+            }
+            out += line + '\n';
+        }
+        return out;
+    }
+
+    let outCanvas = null, outCtx = null, content = null, probes = 0;
 
     // Pace encodes to real time so we never feed the encoder bursts. The
     // emulator redraws rAF's canvas continuously, but we only encode one frame
@@ -366,18 +388,27 @@ async function startVideo(canvas) {
 
         // First frames carry no game picture yet (black); keep sampling until we
         // learn the content region, then freeze it (the canvas rarely moves).
-        if (!content && probed < 20) {
-            probed++;
-            const got = findContent(videoFrame);
-            if (got && (got.w < 0.98 || got.h < 0.98 || got.x > 0.01 || got.y > 0.01)) {
-                const probeW = Math.max(1, Math.floor(got.w * got.sx));
-                const probeH = Math.max(1, Math.floor(got.h * got.sy));
-                log(`capture surface ${got.sx}x${got.sy} — game region ` +
-                    `${Math.round(got.x * got.sx)},${Math.round(got.y * got.sy)} ` +
-                    `${probeW}x${probeH} (${(probeW / probeH).toFixed(2)}:1)`);
-                content = got;
-            } else if (probed >= 20) {
-                content = { x: 0, y: 0, w: 1, h: 1 };
+        if (!content && probes < 30) {
+            probes++;
+            const got = probeFrame(videoFrame);
+            const big = content && got ? (got.area > content.area) : !!got;
+            if (got && (!content || big)) content = got;
+            // Nothing bright enough yet — keep the giant surface as-is for now.
+            if (probes >= 30 && !content) content = { x: 0, y: 0, w: 1, h: 1, sx: config.width, sy: config.height, area: 1 };
+            if (big && got) {
+                const cx = Math.round(got.x * got.sx), cy = Math.round(got.y * got.sy);
+                const cw = Math.max(1, Math.round(got.w * got.sx)), ch = Math.max(1, Math.round(got.h * got.sy));
+                log(`capture surface ${got.sx}x${got.sy} — game region ${cx},${cy} ${cw}x${ch} (${(cw / ch).toFixed(2)}:1)`);
+            }
+            if (probes === 1) {
+                try {
+                    const pw = 64, ph = Math.max(8, Math.round(pw * got.sy / got.sx));
+                    const pc = document.createElement('canvas');
+                    pc.width = pw; pc.height = ph;
+                    const pctx = pc.getContext('2d', { willReadFrequently: true });
+                    pctx.drawImage(videoFrame, 0, 0, pw, ph);
+                    log('surface preview:\n' + asciiArt(pctx, pw, ph));
+                } catch {}
             }
         }
 
