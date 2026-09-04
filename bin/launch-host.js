@@ -249,14 +249,10 @@ async function main() {
     // SwiftShader. On headless Linux avoid the Vulkan-xcb path (no X server → the
     // ANGLE display fails, glGenBuffers throws 'Cannot read properties of
     // undefined' and the game never renders); force SwiftShader over GLES-ANGLE.
-    const isWin = process.platform === 'win32';
-    // Use SwiftShader GLES on Linux: the Vulkan variant
-    // (--use-angle=swiftshader) segfaults this Chromium's GPU process
-    // (exit 11, no WebGL); swiftshader-webgl keeps the GPU process alive
-    // and yields contexts. Windows keeps plain swiftshader.
-    const glFlags = isWin
-        ? ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
-        : ['--use-gl=angle', '--use-angle=swiftshader-webgl', '--enable-unsafe-swiftshader'];
+    // Match the proven arena flag set (mario64 renders correctly with it):
+    // --use-gl=angle --use-angle=swiftshader on every platform. Only vary on
+    // platforms we can't auto-detect here; keep it identical to arena.
+    const glFlags = ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'];
 
     // With no DISPLAY on Linux, run Chromium under Xvfb so its GPU/WebGL
     // process has a backend to talk to.
