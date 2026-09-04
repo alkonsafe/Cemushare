@@ -192,9 +192,17 @@
     // The game re-anchors its GL viewport to its own reference size (1920x1080)
     // whenever the canvas resizes, which is LARGER than our 480x360 canvas, so
     // WebGL clips the render to the buffer and we see only a corner. Force every
-    // gl.viewport to the full canvas drawing buffer: classic-GL stretches SM64's
-    // 4:3 framebuffer to whatever viewport size it's given, so pinning viewport
-    // == canvas turns the corner into the whole picture at 4:3.
+    // gl.viewport call ourselves. The game presents its frame with its own aspect
+    // assumption, so we expose non-uniform X/Y scale knobs (m64zx/m64zy URL
+    // params, defaults below) plus an X/Y pan (m64ox/m64oy) to reshape the
+    // picture: viewport bigger than the canvas on an axis crops/zooms that axis,
+    // smaller letterboxes/unzooms it.
+    const _m64p = new URLSearchParams(location.search);
+    const _ZX = parseFloat(_m64p.get('m64zx') || '1.25');   // >1 = zoom-in on X
+    const _ZY = parseFloat(_m64p.get('m64zy') || '0.82');   // <1 = unzoom on Y
+    const _OX = parseFloat(_m64p.get('m64ox') || '0');
+    const _OY = parseFloat(_m64p.get('m64oy') || '0');
+    console.log('[m64] viewport knobs zx=' + _ZX + ' zy=' + _ZY + ' ox=' + _OX + ' oy=' + _OY);
     const _vpTimer = setInterval(() => {
       const M = window.Module;
       const cv = M && M.canvas;
@@ -202,11 +210,14 @@
       if (!g || g.viewport.__m64Fixed) return;
       const orig = g.viewport;
       g.viewport = function (x, y, w, h) {
-        return orig.call(this, 0, 0, cv.width, cv.height);
+        const vw = Math.max(1, Math.round(cv.width * _ZX));
+        const vh = Math.max(1, Math.round(cv.height * _ZY));
+        return orig.call(this, Math.round(_OX), Math.round(_OY), vw, vh);
       };
       g.viewport.__m64Fixed = true;
-      console.log('[m64] viewport wrapper installed on ' + cv.width + 'x' + cv.height);
-      try { orig.call(g, 0, 0, cv.width, cv.height); } catch (e) {}
+      console.log('[m64] viewport wrapper installed on ' + cv.width + 'x' + cv.height
+        + ' -> view ' + Math.round(cv.width * _ZX) + 'x' + Math.round(cv.height * _ZY));
+      try { orig.call(g, Math.round(_OX), Math.round(_OY), Math.round(cv.width * _ZX), Math.round(cv.height * _ZY)); } catch (e) {}
       clearInterval(_vpTimer);
     }, 25);
   })();
