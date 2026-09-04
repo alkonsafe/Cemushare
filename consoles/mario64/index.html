@@ -149,29 +149,37 @@
 
     // ── Size watchdog ──────────────────────────────────────────────────────
     // The game boots its canvas at 320x240, then during init grows it to its own
-    // reference size (1920x270 at boot, 1920x1080 after a resize). We want 16:9
-    // to match the 640x360 viewer box exactly.
+    // reference size (1920x270 at boot, 1920x1080 after a resize). We re-drive
+    // ITS OWN resize API (setCanvasSize -> updateCanvasDimensions +
+    // updateResizeListeners) so the emulator's INTERNAL notion of its size is
+    // updated too. Writing the canvas ATTRIBUTES alone only patches the surface:
+    // the game keeps re-asserting its 1920-wide size every frame and the capture
+    // shows the ultra-wide strip again.
     //
-    // IMPORTANT: we deliberately do NOT use Module.setCanvasSize here. That path
-    // fires the game's resize listeners, and the game's own resize handler then
-    // re-asserts ITS computed width — pinning 480x270 made it re-assert ~213
-    // forever (the endless reconfigure loop). Writing the canvas ATTRIBUTES via
-    // the property path (c.width = v) sends no resize event, so the game never
-    // fights back; the GL viewport wrapper below then forces the raster to the
-    // real buffer, so the full frame surfaces instead of a corner/second strip.
-    // host.js's cap setter may downscale 640x360 -> 480x270 — same 16:9 aspect.
-    const GOAL_W = 640, GOAL_H = 360;
-    let _lastW = 0, _lastH = 0;
+    // 480x360 (4:3) is the size this game will actually settle on — it accepts
+    // that width for a 360-high canvas and stops re-asserting (verified earlier).
+    // Pinning 16:9 sizes makes its resize handler re-assert its own width forever
+    // (the endless reconfigure loop), so we stay on the accepted 4:3 size and the
+    // GL viewport fix below handles the fill. host.js caps at 480 wide, so this
+    // IS the capture resolution; the viewer box should match this 4:3 aspect.
+    const PIN_W = 480, PIN_H = 360;
+    let correcting = false, _stall = 0, _stallLogged = false;
     function correctSize() {
-      if (_lastW && c.width === _lastW && c.height === _lastH) return; // stable
-      const prev = c.width + 'x' + c.height;
-      try {
-        c.height = GOAL_H;           // set height first so any host.js cap keeps 16:9
-        c.width = GOAL_W;            // last write wins; game gets no resize event
-      } catch (err) { console.error('[m64] canvas resize failed:', err); return; }
-      _lastW = c.width;
-      _lastH = c.height;
-      console.log('[m64] canvas ' + prev + ' -> ' + _lastW + 'x' + _lastH);
+      const M = window.Module;
+      if (!M || typeof M.setCanvasSize !== 'function') return;
+      if (correcting) return;
+      if (c.width === PIN_W && c.height === PIN_H) { _stall = 0; return; }
+      correcting = true;
+      const before = c.width + 'x' + c.height;
+      try { M.setCanvasSize(PIN_W, PIN_H); }
+      catch (err) { console.error('[m64] setCanvasSize failed:', err); }
+      finally { correcting = false; }
+      if (c.width === PIN_W && c.height === PIN_H) _stall = 0;
+      else if (++_stall > 6 && !_stallLogged) {
+        _stallLogged = true;
+        console.warn('[m64] game keeps overriding the 480x360 pin (' + before
+          + ' -> ' + c.width + 'x' + c.height + ') — giving up auto-correct');
+      }
     }
     setInterval(correctSize, 100);
     setTimeout(correctSize, 400);
@@ -184,8 +192,8 @@
     // WebGL clips the render and we see only a corner. Force every gl.viewport
     // call to the canvas's CURRENT buffer (re-read each call, so it tracks
     // watchdog resizes too). Defaults zx=zy=1 => viewport exactly the buffer =
-    // full uncropped frame; the game's 16:9 world matches the 16:9 canvas, so no
-    // reshaping is needed. m64zx/m64zy (scale) and m64ox/m64oy (pan) remain as
+    // full uncropped frame; the game's 4:3 N64 world matches the 4:3 canvas, so
+    // no reshaping is needed. m64zx/m64zy (scale) and m64ox/m64oy (pan) remain as
     // URL overrides: viewport bigger than the canvas crops/zooms that axis,
     // smaller letterboxes/unzooms it.
     const _m64p = new URLSearchParams(location.search);
