@@ -273,6 +273,16 @@ async function main() {
         // takes focus, which throttles rAF/MediaStream and slows the emulator
         // (game + audio stutter). This is the flag that actually stops that.
         '--disable-features=CalculateNativeWinOcclusion',
+        // Force 1:1 CSS→device pixels. Headless SwiftShader sometimes reports a
+        // backing surface scaled by DPR (mario64 captured as 1920x270 = 480x270
+        // × 4 on width only instead of its real 320x240), which made the whole
+        // picture shrink to a thin mid-canvas strip. This also keeps mouse
+        // input coords in real device pixels.
+        '--force-device-scale-factor=1',
+        // Stop the media-session runtime suspending audio/video when the launch
+        // window loses focus (an additional source of unfocus stutter beyond the
+        // occlusion flags).
+        '--disable-blink-features=MediaSession',
         '--hide-scrollbars',
         '--disable-gpu-vsync',
         '--disable-frame-rate-limit',
