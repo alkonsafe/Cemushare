@@ -186,38 +186,73 @@
     setTimeout(correctSize, 1000);
     setTimeout(correctSize, 2000);
 
-    // ── GL viewport fix ────────────────────────────────────────────────────
-    // The game re-anchors its GL viewport to its own reference size (1920x1080)
-    // whenever the canvas resizes, which is LARGER than the real canvas, so
-    // WebGL clips the render and we see only a corner. Force every gl.viewport
-    // call to the canvas's CURRENT buffer (re-read each call, so it tracks
-    // watchdog resizes too). Defaults zx=zy=1 => viewport exactly the buffer =
-    // full uncropped frame; the game's 4:3 N64 world matches the 4:3 canvas, so
-    // no reshaping is needed. m64zx/m64zy (scale) and m64ox/m64oy (pan) remain as
-    // URL overrides: viewport bigger than the canvas crops/zooms that axis,
-    // smaller letterboxes/unzooms it.
+    // ── GL viewport/scissor fix ────────────────────────────────────────────
+    // The game re-anchors its GL viewport (and scissor) to ITS OWN reference size
+    // (1920x1080) whenever the canvas resizes — LARGER than the real canvas — so
+    // WebGL clips the render and we only see a crop/corner, plus it can scissor
+    // off part of the buffer. We wrap BOTH on the WebGL prototypes BEFORE the
+    // game bundle loads (guaranteed to catch every GL call; the old per-context
+    // instance wrap could miss early calls if the context appeared late) and
+    // force them to the canvas's CURRENT buffer, re-read each call so they track
+    // watchdog resizes. Defaults zx=zy=1 => exactly the buffer = full uncropped
+    // frame. m64zx/m64zy (scale) and m64ox/m64oy (pan) remain as URL overrides:
+    // viewport bigger than the canvas crops/zooms that axis, smaller
+    // letterboxes/unzooms it. The game's RAW viewport requests are logged (first
+    // few, on change) to reveal the logical size the game thinks it is using.
     const _m64p = new URLSearchParams(location.search);
     const _ZX = parseFloat(_m64p.get('m64zx') || '1');   // >1 = zoom-in on X, <1 = unzoom
     const _ZY = parseFloat(_m64p.get('m64zy') || '1');   // >1 = zoom-in on Y, <1 = unzoom
     const _OX = parseFloat(_m64p.get('m64ox') || '0');
     const _OY = parseFloat(_m64p.get('m64oy') || '0');
-    console.log('[m64] viewport knobs zx=' + _ZX + ' zy=' + _ZY + ' ox=' + _OX + ' oy=' + _OY);
+    console.log('[m64] gl knobs zx=' + _ZX + ' zy=' + _ZY + ' ox=' + _OX + ' oy=' + _OY);
+
+    const _rawReported = new Set();
+    function _logRaw(x, y, w, h) {
+      if (_rawReported.size >= 8) return;
+      const k = x + ',' + y + ',' + w + ',' + h;
+      if (_rawReported.has(k)) return;
+      _rawReported.add(k);
+      console.warn('[m64] game requested viewport(' + x + ',' + y + ',' + w + 'x' + h + ')');
+    }
+    function _pinProto(proto) {
+      if (!proto) return;
+      for (const name of ['viewport', 'scissor']) {
+        const orig = proto[name];
+        if (typeof orig !== 'function' || orig.__m64Pinned) continue;
+        proto[name] = function (x, y, w, h) {
+          if (name === 'viewport') _logRaw(x, y, w, h);
+          const cv2 = window.Module && window.Module.canvas;
+          const ww = Math.max(1, Math.round((cv2 ? cv2.width : 320) * _ZX));
+          const hh = Math.max(1, Math.round((cv2 ? cv2.height : 240) * _ZY));
+          return orig.call(this, Math.round(_OX), Math.round(_OY), ww, hh);
+        };
+        try { proto[name].__m64Pinned = true; } catch (e) {}
+      }
+    }
+    try { _pinProto(window.WebGLRenderingContext && WebGLRenderingContext.prototype); } catch (e) {}
+    try { _pinProto(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype); } catch (e) {}
+
+    // Once the game's context exists, log the pin + force the first calls so the
+    // very first frame is already correct (not just from the next gl.viewport).
     const _vpTimer = setInterval(() => {
-      const M = window.Module;
-      const cv = M && M.canvas;
+      const cv = window.Module && window.Module.canvas;
       const g = cv && cv.GLctxObject && cv.GLctxObject.GLctx;
-      if (!g || g.viewport.__m64Fixed) return;
-      const orig = g.viewport;
-      g.viewport = function (x, y, w, h) {
-        const vw = Math.max(1, Math.round(cv.width * _ZX));
-        const vh = Math.max(1, Math.round(cv.height * _ZY));
-        return orig.call(this, Math.round(_OX), Math.round(_OY), vw, vh);
-      };
-      g.viewport.__m64Fixed = true;
-      console.log('[m64] viewport wrapper installed on ' + cv.width + 'x' + cv.height
-        + ' -> view ' + Math.round(cv.width * _ZX) + 'x' + Math.round(cv.height * _ZY));
-      try { orig.call(g, Math.round(_OX), Math.round(_OY), Math.round(cv.width * _ZX), Math.round(cv.height * _ZY)); } catch (e) {}
-      clearInterval(_vpTimer);
+      if (g) {
+        if (!g._m64PinnedNotified) {
+          g._m64PinnedNotified = true;
+          console.log('[m64] gl pin active — buffer=' + cv.width + 'x' + cv.height
+            + ', pinned view=' + Math.round(cv.width * _ZX) + 'x' + Math.round(cv.height * _ZY));
+          try { g.viewport(0, 0, 0, 0); } catch (e) {}
+          try { g.scissor(0, 0, 0, 0); } catch (e) {}
+        }
+        clearInterval(_vpTimer);
+      } else {
+        _vpTimer._missed = (_vpTimer._missed || 0) + 1;
+        if (_vpTimer._missed > 600) {
+          clearInterval(_vpTimer);
+          console.warn('[m64] no GLctx found in 15s — gl pin NOT active');
+        }
+      }
     }, 25);
   })();
 </script>
