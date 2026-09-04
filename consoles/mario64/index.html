@@ -200,8 +200,8 @@
     // picture: viewport bigger than the canvas on an axis crops/zooms that axis,
     // smaller letterboxes/unzooms it.
     const _m64p = new URLSearchParams(location.search);
-    const _ZX = parseFloat(_m64p.get('m64zx') || '1');   // >1 = zoom-in on X
-    const _ZY = parseFloat(_m64p.get('m64zy') || '2.5');   // <1 = unzoom on Y
+    const _ZX = parseFloat(_m64p.get('m64zx') || '0.1');   // >1 = zoom-in on X
+    const _ZY = parseFloat(_m64p.get('m64zy') || '3');   // <1 = unzoom on Y
     const _OX = parseFloat(_m64p.get('m64ox') || '0');
     const _OY = parseFloat(_m64p.get('m64oy') || '0');
     console.log('[m64] viewport knobs zx=' + _ZX + ' zy=' + _ZY + ' ox=' + _OX + ' oy=' + _OY);
