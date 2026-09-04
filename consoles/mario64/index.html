@@ -97,17 +97,32 @@
     // written (property setter vs setAttribute) — host.js's prototype cap only
     // intercepts the property path, so a 1920x270 along a different path would
     // slip through invisibly. Attribute filter: width, height, style.
+    const PIN_W = 320, PIN_H = 240; // game's native surface (known-good boot state)
+    let correcting = false;
     const attrWatch = new MutationObserver((muts) => {
       for (const m of muts) {
         const oldV = m.oldValue || '';
         const newV = c.getAttribute(m.attributeName) || '';
+        const was = Math.round(performance.now());
         console.log('[m64] attr-changed', m.attributeName,
-          'old=(' + oldV + ')', 'new=(' + newV + ')',
-          't=' + Math.round(performance.now()) + 'ms');
+          'old=(' + oldV + ')', 'new=(' + newV + ')', 't=' + was + 'ms');
         if (m.attributeName === 'width' || m.attributeName === 'height') {
           const r = c.getBoundingClientRect();
           console.log('[m64]   after:', 'attr=', c.width + 'x' + c.height,
             'rect=', Math.round(r.width) + 'x' + Math.round(r.height));
+          if (!correcting) {
+            correcting = true;
+            try {
+              if (c.getAttribute('width') !== String(PIN_W)) {
+                c.setAttribute('width', String(PIN_W));
+                console.log('[m64]   -> forced width to', PIN_W);
+              }
+              if (c.getAttribute('height') !== String(PIN_H)) {
+                c.setAttribute('height', String(PIN_H));
+                console.log('[m64]   -> forced height to', PIN_H);
+              }
+            } finally { correcting = false; }
+          }
         }
       }
     });
