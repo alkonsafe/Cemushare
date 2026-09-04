@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>emulatorSHARE — Mario 64 host</title>
+<style>
+  html, body { margin: 0; background: #000; overflow: hidden; }
+  #canvas { display: block; background: #000; image-rendering: pixelated; }
+  #boot { position: fixed; left: 8px; top: 8px; color: #6f6; font: 12px monospace; z-index: 9; }
+</style>
+<!-- host.js FIRST as a classic script, BEFORE the emulator bundle. It installs
+     the AudioContext shim + viewport pinning, which only work if present before
+     the wasm constructs its context and CSS-casted canvas. -->
+<script src="/_shared/host.js"></script>
+</head>
+<body>
+  <canvas id="canvas" tabindex="0" width="320" height="240" data-host-canvas="1"></canvas>
+  <div id="boot">booting…</div>
+
+<script>
+  window.Module = window.Module || {};
+  Module.canvas = document.getElementById('canvas');
+  Module.locateFile = (p) => (p.endsWith('.wasm') ? (p in { 'sm64.wasm': 1 } ? p : p) : p);
+  Module.preRun = Module.preRun || [];
+  Module.postRun = Module.postRun || [];
+  Module.print = (t) => console.log(t);
+  Module.printErr = (t) => console.warn(t);
+  Module.setStatus = (t) => {
+    const el = document.getElementById('boot');
+    if (el) { el.textContent = t || ''; if (!t) el.style.display = 'none'; }
+  };
+
+  // Persistent save in the chromium profile (IndexedDB). Survives restarts
+  // because the profile dir is a mounted volume.
+  Module.preRun.push(function () {
+    try {
+      if (Module.FS && Module.IDBFS) {
+        try { Module.FS.mkdir('/save'); } catch {}
+        Module.FS.mount(Module.IDBFS, {}, '/save');
+      }
+    } catch (err) { console.error('save mount failed:', err); }
+  });
+
+  Module.onRuntimeInitialized = function () {
+    try {
+      if (Module.FS && Module.IDBFS) {
+        Module.FS.syncfs(true, (err) => err && console.warn('save load error:', err));
+        window.saveNow = function (cb) {
+          try { if (typeof Module.writeSave === 'function') Module.writeSave(); } catch {}
+          Module.FS.syncfs(false, (e) => typeof cb === 'function' && cb(e));
+        };
+        setInterval(() => window.saveNow(), 5000);
+      }
+    } catch (err) { console.error('save init failed:', err); }
+
+    if (typeof window.__hostStart === 'function') window.__hostStart();
+  };
+</script>
+<script src="./bin/sm64.js"></script>
+</body>
+</html>

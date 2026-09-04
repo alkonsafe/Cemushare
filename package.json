@@ -1,0 +1,21 @@
+{
+  "name": "emulatorSHARE",
+  "version": "1.0.0",
+  "private": true,
+  "description": "EmulatorShare — share many emulators with many people at once. Each console is a headless-Chromium host streaming pixels to every viewer.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "host-static": "node host/serve-host.js",
+    "host-console": "node bin/launch-host.js",
+    "test": "node test/protocol.test.js",
+    "test:e2e": "node test/e2e.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.3",
+    "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

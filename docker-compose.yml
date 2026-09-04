@@ -1,0 +1,34 @@
+# emulatorSHARE — run the relay + N headless-Chromium consoles in one container.
+#
+# The relay listens on 8090 (bind LOOPBACK; front it with nginx/caddy publicly).
+# Each Chromium profile (the save files) lives under data/profile/<key>, mounted
+# as a volume so emulator saves survive container restarts.
+
+services:
+  emulatorshare:
+    build: .
+    image: emulatorshare:latest
+    container_name: emulatorshare
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - emulatorshare-profile:/data/profile
+    environment:
+      EMULATOR_PORT: "8090"
+      EMULATOR_HOST_TOKEN: "${EMULATOR_HOST_TOKEN:?set EMULATOR_HOST_TOKEN in .env}"
+      EMULATOR_JWT_SECRET: "${EMULATOR_JWT_SECRET:?set EMULATOR_JWT_SECRET in .env}"
+      EMULATOR_ALLOW_GUEST: "${EMULATOR_ALLOW_GUEST:-0}"
+      EMULATOR_CONSOLE_KEYS: "${EMULATOR_CONSOLE_KEYS:-demo}"
+      # Optional per-console metadata, one var per key:
+      # EMULATOR_META_DEMO: "Demo Console|demo.png|Demo|A testable console"
+      EMULATOR_META_DEMO: "${EMULATOR_META_DEMO:-Demo Console||Demo|A self-contained demo console}"
+      EMULATOR_META_MARIO64: "${EMULATOR_META_MARIO64:-Super Mario 64||Nintendo 64|One global Mario 64}"
+      EMULATOR_FPS: "${EMULATOR_FPS:-30}"
+      EMULATOR_BITRATE: "${EMULATOR_BITRATE:-1800000}"
+    cpus: 2.0
+    mem_limit: 3g
+    shm_size: 512m
+
+volumes:
+  emulatorshare-profile:

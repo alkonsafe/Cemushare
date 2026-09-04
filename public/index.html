@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>emulatorSHARE</title>
+    <link rel="stylesheet" type="text/css" href="styles.css">
+    <script src="css.js"></script> 
+    <script>
+        tailwind.config = {
+            darkMode: 'class'
+        }
+    </script>
+</head>
+<div id="rulesModal" class="hidden fixed inset-0 z-50 flex items-center justify-center">
+    <div class="absolute inset-0 bg-black/50 backdrop-blur-sm" onclick="closeRulesModal()"></div>
+    <div class="relative bg-white dark:bg-gray-800 rounded-xl shadow-xl w-full max-w-md mx-4 p-6">
+        <div class="flex gap-2">
+            <svg height="24px" class="w-5 h-5 text-gray-900 dark:text-white" viewBox="0 -960 960 960" width="24px" fill="currentColor"><path d="M560-564v-68q33-14 67.5-21t72.5-7q26 0 51 4t49 10v64q-24-9-48.5-13.5T700-600q-38 0-73 9.5T560-564Zm0 220v-68q33-14 67.5-21t72.5-7q26 0 51 4t49 10v64q-24-9-48.5-13.5T700-380q-38 0-73 9t-67 27Zm0-110v-68q33-14 67.5-21t72.5-7q26 0 51 4t49 10v64q-24-9-48.5-13.5T700-490q-38 0-73 9.5T560-454ZM260-320q47 0 91.5 10.5T440-278v-394q-41-24-87-36t-93-12q-36 0-71.5 7T120-692v396q35-12 69.5-18t70.5-6Zm260 42q44-21 88.5-31.5T700-320q36 0 70.5 6t69.5 18v-396q-33-14-68.5-21t-71.5-7q-47 0-93 12t-87 36v394Zm-40 118q-48-38-104-59t-116-21q-42 0-82.5 11T100-198q-21 11-40.5-1T40-234v-482q0-11 5.5-21T62-752q46-24 96-36t102-12q58 0 113.5 15T480-740q51-30 106.5-45T700-800q52 0 102 12t96 36q11 5 16.5 15t5.5 21v482q0 23-19.5 35t-40.5 1q-37-20-77.5-31T700-240q-60 0-116 21t-104 59ZM280-494Z"/></svg>
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Rules</h2>
+        </div>
+        <div class="space-y-3">
+            <div>
+                <p class="text-gray-700 dark:text-gray-300 text-sm">
+                    <strong>1.</strong> No racist/sexist or Homophobic content is permitted.
+                </p>
+            </div>
+            <div>
+                <p class="text-gray-700 dark:text-gray-300 text-sm">
+                    <strong>2.</strong> Do NOT break the emulators for fun or delete save files for no reason.
+                </p>
+            </div>
+            <div>
+                <p class="text-gray-700 dark:text-gray-300 text-sm">
+                    <strong>3.</strong> Do not harass anyone.
+                </p>
+            </div>
+            <div>
+                <p class="text-gray-700 dark:text-gray-300 text-sm">
+                    <strong>4.</strong> Do not post/draw NSFW art in the discord server; nor on the emulators.
+                </p>
+            </div>
+        </div>
+        <div class="flex gap-3 mt-5">
+            <button onclick="closeRulesModal()" class="flex-1 px-4 py-2 text-sm rounded-lg border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">Close</button>
+        </div>
+    </div>
+</div>
+<body class="bg-gray-50 dark:bg-gray-900 transition-colors duration-200">
+    <div id="authContainer" class="min-h-screen flex items-center justify-center px-4">
+        <div class="w-full max-w-md">
+            <div class="mb-2">
+                <h1 class="text-2xl font-semibold text-gray-900 dark:text-white text-left"><span class="text-[#1E88E5]">emulator</span><span class="text-[#FF6B35]">SHARE</span></h1>
+            </div>
+            <div id="loginForm" class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
+                <h2 class="text-2xl font-semibold text-gray-900 dark:text-white mb-6">Login</h2>
+                <form id="loginFormElement" class="space-y-4">
+                    <div>
+                        <label for="loginusername" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">username</label>
+                        <input type="username" id="loginusername" required class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white">
+                    </div>
+                    <div>
+                        <label for="loginpassword" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">password</label>
+                        <input type="password" id="loginpassword" required class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white">
+                    </div>
+                    <div id="loginError" class="text-red-500 text-sm hidden"></div>
+                    <button id="loginBtn" type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition-colors">Login</button>
+                </form>
+                <p class="mt-4 text-center text-sm text-gray-600 dark:text-gray-400">Don't have an account? <button onclick="showRegister()" class="text-blue-600 dark:text-blue-400 hover:underline font-medium">Register</button></p>
+            </div>
+            <div id="registerForm" class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8 hidden">
+                <h2 class="text-2xl font-semibold text-gray-900 dark:text-white mb-6">Register</h2>
+                <form id="registerFormElement" class="space-y-4">
+                    <div>
+                        <label for="registerusername" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">username</label>
+                        <input type="text" id="registerusername" required class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white">
+                    </div>
+                    <div>
+                        <label for="registerpassword" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">password</label>
+                        <input type="password" id="registerpassword" required class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white">
+                    </div>
+                    <div id="registerError" class="text-red-500 text-sm hidden"></div>
+                    <button id="registerBtn" type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-2 px-4 rounded-md transition-colors">Register</button>
+                </form>
+                <p class="mt-4 text-center text-sm text-gray-600 dark:text-gray-400">Already have an account? <button onclick="showLogin()" class="text-blue-600 dark:text-blue-400 hover:underline font-medium">Login</button></p>
+            </div>
+        </div>
+    </div>
+    <div id="appContainer" class="hidden min-h-screen flex">
+        <main class="flex-1 bg-white dark:bg-gray-900">
+            <div class="w-full flex items-center pt-5 pl-5">
+            <button onclick="goHome()" class="hover:opacity-80 transition-opacity">
+                <h1 class="text-2xl font-semibold text-gray-900 dark:text-white flex-shrink-0" alt="emulatorSHARE" style="
+                    font-size: 50px;font-family: 'SuperMario';color: #ce3e21;-webkit-text-stroke: 10px black;paint-order: stroke fill;">
+                    <span class="text-blue-600">e</span><span class="text-orange-600">s</span>
+                </h1>
+            </button>
+            <!-- <span class="text-[10px] font-bold text-gray-500 px-0.5 translate-y-1 py-0.5">
+                Approved by Nintendo!*
+            </span> -->
+            <button onclick="toggleTheme()" class="flex items-center gap-2 px-1 transition-all group pl-5">
+                <svg id="themeIconLight" class="w-5 h-5 text-gray-600 dark:text-gray-400 hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="3"></circle>
+                    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+                </svg>
+                <svg id="themeIconDark" class="w-5 h-5 text-gray-600 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"></path></svg>
+                <span id="themeText" class="text-gray-500 dark:text-gray-400 hover:text-black dark:hover:text-gray-300 translate-y-0.5">
+                    Dark Mode
+                </span>
+            </button>
+            <button onclick="openRulesModal()" class="flex items-center gap-2 px-1 transition-all group pl-5">
+                <svg height="24px" class="w-5 h-5 text-gray-600 dark:text-gray-400" viewBox="0 -960 960 960" width="24px" fill="currentColor"><path d="M560-564v-68q33-14 67.5-21t72.5-7q26 0 51 4t49 10v64q-24-9-48.5-13.5T700-600q-38 0-73 9.5T560-564Zm0 220v-68q33-14 67.5-21t72.5-7q26 0 51 4t49 10v64q-24-9-48.5-13.5T700-380q-38 0-73 9t-67 27Zm0-110v-68q33-14 67.5-21t72.5-7q26 0 51 4t49 10v64q-24-9-48.5-13.5T700-490q-38 0-73 9.5T560-454ZM260-320q47 0 91.5 10.5T440-278v-394q-41-24-87-36t-93-12q-36 0-71.5 7T120-692v396q35-12 69.5-18t70.5-6Zm260 42q44-21 88.5-31.5T700-320q36 0 70.5 6t69.5 18v-396q-33-14-68.5-21t-71.5-7q-47 0-93 12t-87 36v394Zm-40 118q-48-38-104-59t-116-21q-42 0-82.5 11T100-198q-21 11-40.5-1T40-234v-482q0-11 5.5-21T62-752q46-24 96-36t102-12q58 0 113.5 15T480-740q51-30 106.5-45T700-800q52 0 102 12t96 36q11 5 16.5 15t5.5 21v482q0 23-19.5 35t-40.5 1q-37-20-77.5-31T700-240q-60 0-116 21t-104 59ZM280-494Z"/></svg>
+                <span class="text-gray-500 dark:text-gray-400 hover:text-black dark:hover:text-gray-300 translate-y-0.5">
+                    Rules
+                </span>
+            </button>
+            <!-- <button onclick="showContactModal()" class="flex items-center gap-2 px-1 transition-all group pl-5">
+                <span class="text-gray-500 dark:text-gray-400 hover:text-black dark:hover:text-gray-300 translate-y-0.5">
+                    Bird
+                </span>
+            </button> -->
+            <button onclick="showContactModal()" class="flex items-center gap-2 px-1 transition-all group pl-5">
+                <img src="discord-icon.svg", alt="dis" width="20" height="20"/>
+                <span class="text-gray-500 dark:text-gray-400 hover:text-black dark:hover:text-gray-300 translate-y-0.5">
+                    Join the discord!
+                </span>
+            </button>
+        </div>
+
+            <div id="mainPage" class="page-content p-2">
+                <div id="consolesGrid" class="mt-4 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3"></div>
+            </div>
+
+            <!-- Console Viewer Page -->
+            <div id="consoleViewerPage" class="hidden page-content p-3 flex flex-col items-center">
+                <div id="consoleViewerContainer" class="shadow-md dark:bg-gray-800 bg-gray-100 rounded-lg p-4 h-[550px] w-[720px] overflow-hidden items-center justify-center align-middle self-center flex mx-auto relative">
+                    <canvas id="consoleCanvas" class="w-full h-full object-contain" style="image-rendering: pixelated; image-rendering: crisp-edges;"></canvas>
+                    <div id="streamStatus" class="hidden absolute inset-0 flex items-center justify-center text-gray-500 dark:text-gray-300 font-mono text-sm"></div>
+                </div>
+
+                <div class="mt-4 flex gap-4 w-full mx-auto pl-6 pr-6">
+                    <div id="playerListContainer" class="shadow h-60 w-1/4 bg-white dark:bg-gray-700 rounded-lg p-4 border border-gray-300 dark:border-gray-600 flex flex-col">
+                        <h3 id="playerText" class="dark:text-white text-black font-medium mb-2 border-b border-gray-300 dark:border-gray-600 pb-1">Players:</h3>
+                        <ul id="playerList" class="text-gray-300 text-sm overflow-y-auto h-48">
+                        </ul>
+                    </div>
+
+                    <div id="chatContainer" class="flex-1">
+                        <div id="chatMessages" class="shadow h-48 overflow-y-auto bg-white dark:bg-gray-700 text-white border border-gray-300 dark:border-gray-600 p-4 pl-2 rounded-lg mb-2">
+                            </div>
+                        <form id="chatForm" class="flex">
+                            <input type="text" id="chatInput" placeholder="Type a message..." class="shadow flex-1 px-4 py-2 border bg-white border-gray-300 dark:border-gray-600 rounded-l-md focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white">
+                            <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-medium px-4 rounded-r-md transition-colors">Send</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+    <script src="app.js"></script>
+</body>
+</html>

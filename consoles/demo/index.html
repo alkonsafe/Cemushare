@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>emulatorSHARE — Demo console</title>
+<style>
+  html, body { margin: 0; background: #000; overflow: hidden; }
+  canvas { display: block; image-rendering: pixelated; background: #0b1020; }
+</style>
+<script src="/_shared/host.js"></script>
+</head>
+<body>
+<canvas id="canvas" width="480" height="270" data-host-canvas="1"></canvas>
+<script>
+  // Self-contained demo console: a bouncing "EMULATORSHARE" scene rendered on a
+  // canvas, plus a Web Audio tone, so the entire stream pipeline (video encode,
+  // audio capture, input relay) is testable without shipping a real ROM.
+  const ctx = document.getElementById('canvas').getContext('2d');
+  let x = 40, y = 60, vx = 3, vy = 2.4;
+  const held = new Set();
+  let hue = 0;
+
+  // The host.js replays merged input as real KeyboardEvents on the canvas. A
+  // tiny demo->game adapter still needs to "grab" the keys, so we listen for
+  // the same data-key mechanism the viewer uses and drive our own physics.
+  const KEYS = { ArrowUp:'ArrowUp', ArrowDown:'ArrowDown', ArrowLeft:'ArrowLeft',
+                 ArrowRight:'ArrowRight', KeyX:'KeyX', KeyC:'KeyC', Space:'Space', Enter:'Enter' };
+
+  function tick() {
+    const w = ctx.canvas.width, h = ctx.canvas.height;
+    if (held.has('ArrowUp') || held.has('KeyX')) y -= 2;
+    if (held.has('ArrowDown')) y += 2;
+    if (held.has('ArrowLeft')) { x -= 2; vx -= 0.2; }
+    if (held.has('ArrowRight')) { x += 2; vx += 0.2; }
+    if (held.has('Space')) y -= 1;
+    vx = Math.max(-6, Math.min(6, vx));
+    x += vx; y += vy;
+    if (x < 8 || x > w - 8) vx = -vx, x = Math.max(8, Math.min(w - 8, x));
+    if (y < 8 || y > h - 8) vy = -vy, y = Math.max(8, Math.min(h - 8, y));
+
+    hue = (hue + 1) % 360;
+    ctx.fillStyle = '#0b1020';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.fillStyle = `hsl(${hue} 80% 60%)`;
+    ctx.beginPath(); ctx.arc(x, y, 12, 0, Math.PI * 2); ctx.fill();
+
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '28px monospace';
+    ctx.textAlign = 'center';
+    ctx.fillText('EMULATORSHARE', w / 2, h / 2);
+    ctx.font = '14px monospace';
+    ctx.fillText('demo console — use arrows / X / C / Space', w / 2, h - 14);
+
+    ctx.fillStyle = '#aaa';
+    ctx.font = '11px monospace';
+    ctx.fillText(`pos ${Math.round(x)},${Math.round(y)}  held=${[...held].join(' ') || 'none'}`, 10, 20);
+
+    requestAnimationFrame(tick);
+  }
+
+  // Grab merged keys from host.js's KeyboardEvents broadcast (host.js fires them
+  // on canvas + document + window, so listening on window is reliable).
+  window.addEventListener('keydown', (e) => { const k = KEYS[e.code]; if (k) { held.add(k); e.preventDefault(); } });
+  window.addEventListener('keyup',   (e) => { const k = KEYS[e.code]; if (k) { held.delete(k); e.preventDefault(); } });
+  window.addEventListener('blur',    () => { held.clear(); });
+
+  // Web Audio: emit a soft tone so audio capture has something to encode.
+  (function tone() {
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      const ac = new AC();
+      const osc = ac.createOscillator(), gain = ac.createGain();
+      osc.frequency.value = 220; gain.gain.value = 0.02;
+      osc.connect(gain); gain.connect(ac.destination); osc.start();
+      setInterval(() => { gain.gain.value = 0.02; setTimeout(() => gain.gain.value = 0, 120); }, 2000);
+    } catch (e) { console.warn('demo tone unavailable', e); }
+  })();
+
+  requestAnimationFrame(tick);
+
+  // The shared host.js starts encoding as soon as this signals. If real game
+  // binaries were present, the emulator would drive __hostStart from its own
+  // onRuntimeInitialized; here we call it once the canvas has a real size.
+  setTimeout(() => { if (typeof window.__hostStart === 'function') window.__hostStart(); }, 400);
+</script>
+</body>
+</html>
