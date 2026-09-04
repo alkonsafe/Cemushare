@@ -290,6 +290,14 @@ async function startVideo(canvas) {
     if (!track) { log('FATAL: canvas produced no video track'); return; }
     const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
 
+    // Pace encodes to real time. captureStream emits on every canvas redraw
+    // (the emulator drives rAF at up to 250fps via the worker timer), which
+    // would otherwise push arbitrarily many frames into the encoder → encode
+    // backlog → bursty wire delivery → the viewer's decode queue sees bursts
+    // and staggers. Always drain the reader (so frames don't pile up inside
+    // the track), but only encode when a full frame interval has elapsed.
+    const frameMs = 1000 / FPS;
+    let lastEncodeAt = 0;
     let n = 0;
     for (;;) {
         const { value: videoFrame, done } = await reader.read();
@@ -305,6 +313,9 @@ async function startVideo(canvas) {
             startVideo(canvas);
             return;
         }
+        const now = performance.now();
+        if (now - lastEncodeAt < frameMs) { videoFrame.close(); continue; }
+        lastEncodeAt = now;
         const key = wantKeyframe || (n++ % (FPS * 2) === 0);
         wantKeyframe = false;
         try { videoEncoder.encode(videoFrame, { keyFrame: key }); } catch (err) { log('encode failed', err.message); }
