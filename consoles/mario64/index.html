@@ -174,6 +174,7 @@
       try { M.setCanvasSize(PIN_W, PIN_H); }
       catch (err) { console.error('[m64] setCanvasSize failed:', err); }
       finally { correcting = false; }
+      _forcePin();
       if (c.width === PIN_W && c.height === PIN_H) _stall = 0;
       else if (++_stall > 6 && !_stallLogged) {
         _stallLogged = true;
@@ -207,6 +208,7 @@
     console.log('[m64] gl knobs zx=' + _ZX + ' zy=' + _ZY + ' ox=' + _OX + ' oy=' + _OY);
 
     const _rawReported = new Set();
+    let _forceActive = false;
     function _logRaw(x, y, w, h) {
       if (_rawReported.size >= 8) return;
       const k = x + ',' + y + ',' + w + ',' + h;
@@ -220,7 +222,7 @@
         const orig = proto[name];
         if (typeof orig !== 'function' || orig.__m64Pinned) continue;
         proto[name] = function (x, y, w, h) {
-          if (name === 'viewport') _logRaw(x, y, w, h);
+          if (name === 'viewport' && !_forceActive) _logRaw(x, y, w, h);
           const cv2 = window.Module && window.Module.canvas;
           const ww = Math.max(1, Math.round((cv2 ? cv2.width : 320) * _ZX));
           const hh = Math.max(1, Math.round((cv2 ? cv2.height : 240) * _ZY));
@@ -232,28 +234,35 @@
     try { _pinProto(window.WebGLRenderingContext && WebGLRenderingContext.prototype); } catch (e) {}
     try { _pinProto(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype); } catch (e) {}
 
-    // Once the game's context exists, log the pin + force the first calls so the
-    // very first frame is already correct (not just from the next gl.viewport).
-    const _vpTimer = setInterval(() => {
+    // The game issues gl.viewport ONLY ONCE at startup (see the "game requested
+    // viewport(0,0,1920x1080)" log) and never again, so after the watchdog
+    // resizes the buffer the viewport would stay at the boot size and we would
+    // show only a crop of it. Force the pin immediately and RE-FORCE it whenever
+    // the canvas size changes (also called from correctSize below).
+    let _lastPinW = 0, _lastPinH = 0;
+    function _forcePin() {
       const cv = window.Module && window.Module.canvas;
       const g = cv && cv.GLctxObject && cv.GLctxObject.GLctx;
-      if (g) {
-        if (!g._m64PinnedNotified) {
-          g._m64PinnedNotified = true;
-          console.log('[m64] gl pin active — buffer=' + cv.width + 'x' + cv.height
-            + ', pinned view=' + Math.round(cv.width * _ZX) + 'x' + Math.round(cv.height * _ZY));
-          try { g.viewport(0, 0, 0, 0); } catch (e) {}
-          try { g.scissor(0, 0, 0, 0); } catch (e) {}
-        }
-        clearInterval(_vpTimer);
-      } else {
-        _vpTimer._missed = (_vpTimer._missed || 0) + 1;
-        if (_vpTimer._missed > 600) {
-          clearInterval(_vpTimer);
-          console.warn('[m64] no GLctx found in 15s — gl pin NOT active');
+      if (!g || !cv) return;
+      const w = Math.max(1, Math.round((cv.width || 320) * _ZX));
+      const h = Math.max(1, Math.round((cv.height || 240) * _ZY));
+      _forceActive = true;
+      try {
+        g.viewport(Math.round(_OX), Math.round(_OY), w, h);
+        g.scissor(Math.round(_OX), Math.round(_OY), w, h);
+      } finally { _forceActive = false; }
+    }
+    const _vpTimer = setInterval(() => {
+      const cv = window.Module && window.Module.canvas;
+      if (cv && cv.GLctxObject && cv.GLctxObject.GLctx) {
+        if (cv.width !== _lastPinW || cv.height !== _lastPinH) {
+          _lastPinW = cv.width; _lastPinH = cv.height;
+          _forcePin();
+          console.log('[m64] gl pin view -> ' + Math.round(cv.width * _ZX) + 'x'
+            + Math.round(cv.height * _ZY) + ' (buffer ' + cv.width + 'x' + cv.height + ')');
         }
       }
-    }, 25);
+    }, 50);
   })();
 </script>
 <script src="./bin/sm64.js"></script>
