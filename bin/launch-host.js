@@ -148,9 +148,10 @@ function findChromium() {
 function xvfbPrefix() {
     if (process.platform !== 'linux') return null;
     if (process.env.DISPLAY && process.env.DISPLAY.trim() !== '') return null;
-    // No DISPLAY → look for xvfb-run. Returns an argv prefix if found.
+    // No DISPLAY → look for xvfb-run. Returns ONLY wrapper option args (not
+    // the program name); the caller prepends the actual browser path.
     const r = spawnSync('which', ['xvfb-run'], { stdio: ['ignore', 'ignore', 'ignore'] });
-    if (r.status === 0) return ['xvfb-run', '-a', '--server-args=-screen 0 1280x800x24'];
+    if (r.status === 0) return ['-a', '--server-args=-screen 0 1280x800x24'];
     return null;
 }
 
@@ -262,7 +263,7 @@ async function main() {
     const xvfb = xvfbPrefix();
     if (xvfb) console.log('[host] no DISPLAY → wrapping chromium with xvfb-run');
 
-    const browser = spawn(xvfb ? [...xvfb, chromium] : chromium, [
+    const browserArgs = [
         '--headless=new',
         '--no-sandbox',
         '--disable-dev-shm-usage',
@@ -274,7 +275,7 @@ async function main() {
         // Disable native-window occlusion detection: without this, Windows
         // reports the headless host window as "occluded" when the viewer window
         // takes focus, which throttles rAF/MediaStream and slows the emulator
-        // (game + audio stutter). Harmless elsewhere.
+        // (game + audio stutter). This is the flag that actually stops that.
         '--disable-features=CalculateNativeWinOcclusion',
         '--hide-scrollbars',
         '--disable-gpu-vsync',
@@ -284,7 +285,11 @@ async function main() {
         '--enable-logging=stderr',
         '--v=0',
         hostUrl,
-    ], { stdio: ['ignore', 'inherit', 'inherit'] });
+    ];
+
+    const browser = spawn(xvfb ? 'xvfb-run' : chromium,
+        xvfb ? [...xvfb, chromium, ...browserArgs] : browserArgs,
+        { stdio: ['ignore', 'inherit', 'inherit'] });
 
     console.log('[host] console running. Ctrl+C to stop.');
     console.log(`[host] stream available at ${relay.replace(/^ws/, 'http')}/ once two+ viewers join.`);
