@@ -96,9 +96,25 @@ Example:
 }
 
 // ── Find a usable headless-capable browser ──────────────────────────────────
+// Prefer the Chromium that Puppeteer downloads (if installed): it bundles its
+// own SwiftShader/EGL/Mesa libs and runs WebGL headless without needing system
+// GL packages, unlike a bare distro `chromium` in a minimal LXC container.
+function findPuppeteerChromium() {
+    try {
+        const res = require.resolve('puppeteer');
+        const { default: puppeteer } = require(res);
+        const exe = puppeteer.executablePath();
+        return (exe && fs.existsSync(exe)) ? exe : null;
+    } catch { return null; }
+}
+
 function findChromium() {
     const env = process.env.CHROME_BIN || process.env.EMULATOR_CHROME;
     if (env && fs.existsSync(env)) return env;
+    if (process.platform !== 'win32') {
+        const p = findPuppeteerChromium();
+        if (p) return p;
+    }
     const candidates = (process.platform === 'win32')
         ? [ 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
             'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',

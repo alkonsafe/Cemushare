@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "better-sqlite3": "^13.0.3",
+    "puppeteer": "^22.0.0",
     "ws": "^8.18.0"
   },
   "engines": {
