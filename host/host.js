@@ -383,32 +383,39 @@ async function startVideo(canvas) {
         const { value: videoFrame, done } = await reader.read();
         if (done) break;
         if (!videoEncoder || videoEncoder.state !== 'configured') { videoFrame.close(); continue; }
-        if (videoEncoder.encodeQueueSize > 2) { videoFrame.close(); continue; }
         const now = performance.now();
 
         // First frames carry no game picture yet (black); keep sampling until we
         // learn the content region, then freeze it (the canvas rarely moves).
         if (!content && probes < 30) {
             probes++;
-            const got = probeFrame(videoFrame);
-            const big = content && got ? (got.area > content.area) : !!got;
-            if (got && (!content || big)) content = got;
-            // Nothing bright enough yet — keep the giant surface as-is for now.
-            if (probes >= 30 && !content) content = { x: 0, y: 0, w: 1, h: 1, sx: config.width, sy: config.height, area: 1 };
-            if (big && got) {
-                const cx = Math.round(got.x * got.sx), cy = Math.round(got.y * got.sy);
-                const cw = Math.max(1, Math.round(got.w * got.sx)), ch = Math.max(1, Math.round(got.h * got.sy));
-                log(`capture surface ${got.sx}x${got.sy} — game region ${cx},${cy} ${cw}x${ch} (${(cw / ch).toFixed(2)}:1)`);
-            }
             if (probes === 1) {
-                try {
+                log(`surface ${videoFrame.displayWidth}x${videoFrame.displayHeight} ` +
+                    `(canvas ${config.width}x${config.height})`);
+            }
+            const got = probeFrame(videoFrame);
+            if (got) {
+                const big = !content || got.area > content.area;
+                if (big) {
+                    content = got;
+                    const cx = Math.round(got.x * got.sx), cy = Math.round(got.y * got.sy);
+                    const cw = Math.max(1, Math.round(got.w * got.sx)), ch = Math.max(1, Math.round(got.h * got.sy));
+                    log(`probe#${probes} region ${cx},${cy} ${cw}x${ch} (${(cw / ch).toFixed(2)}:1)`);
+                }
+                if (!got.previewed) {
+                    got.previewed = true;
                     const pw = 64, ph = Math.max(8, Math.round(pw * got.sy / got.sx));
                     const pc = document.createElement('canvas');
                     pc.width = pw; pc.height = ph;
                     const pctx = pc.getContext('2d', { willReadFrequently: true });
                     pctx.drawImage(videoFrame, 0, 0, pw, ph);
                     log('surface preview:\n' + asciiArt(pctx, pw, ph));
-                } catch {}
+                }
+            }
+            // Nothing bright enough yet — keep the giant surface as-is.
+            if (probes >= 30 && !content) {
+                content = { x: 0, y: 0, w: 1, h: 1, area: 1 };
+                log('no content after 30 probes — using full surface');
             }
         }
 
@@ -431,6 +438,7 @@ async function startVideo(canvas) {
         const outFrame = new VideoFrame(outCanvas, { timestamp: Math.round(now * 1000) });
         videoFrame.close();
 
+        if (videoEncoder.encodeQueueSize > 2) { outFrame.close(); continue; }
         if (now - lastEncodeAt < frameMs) { outFrame.close(); continue; }
         lastEncodeAt = now;
         const key = wantKeyframe || (n++ % (FPS * 2) === 0);
