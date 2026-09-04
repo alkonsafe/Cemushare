@@ -740,6 +740,10 @@ function ensureAvcDescription() {
 
 const MAX_DECODE_QUEUE = 8;
 
+function requestKeyframe() {
+    if (streamWs && streamWs.readyState === 1) streamWs.send(JSON.stringify({ t: 'needkey' }));
+}
+
 function decodeVideo(kind, timestamp, payload) {
     if (!videoDecoder || videoDecoder.state !== 'configured') return;
     const isKey = kind === KIND.VKEY;
@@ -749,6 +753,9 @@ function decodeVideo(kind, timestamp, payload) {
     // fps; an MAX_DECODE_QUEUE of 8 caps decode-only lag to ~270 ms.
     //  - queue > 4: skip delta frames (cheap to drop, expensive to decode)
     //  - queue > MAX_DECODE_QUEUE: drop everything, seek next keyframe
+    // Whenever we drop, ask the host to force a keyframe so the picture snaps
+    // to the latest frame immediately instead of freezing on the last decoded
+    // frame until the next natural keyframe (up to 2s at 30fps).
     if (q > MAX_DECODE_QUEUE) {
         // Decoder is overwhelmed — reset drops ALL queued work (old frames)
         // instantly so we resync on the incoming keyframe instead of decoding
@@ -757,8 +764,12 @@ function decodeVideo(kind, timestamp, payload) {
         try { videoDecoder.reset(); } catch {}
         waitingForKeyframe = true;
         if (isKey) waitingForKeyframe = false;
-    } else if (q > 4 && !isKey) {
+        requestKeyframe();
+        return;
+    }
+    if (q > 4 && !isKey) {
         // Moderate load — skip deltas to keep latency low.
+        requestKeyframe();
         return;
     }
     if (waitingForKeyframe && !isKey) return;
