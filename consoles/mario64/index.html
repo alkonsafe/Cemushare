@@ -153,10 +153,12 @@
     // stretched horizontal strip; if we only shrink the canvas ATTRIBUTES the
     // game still renders at its own size and we see a zoomed corner. So re-drive
     // its own resize API (setCanvasSize -> updateCanvasDimensions +
-    // updateResizeListeners) to 480x270 (16:9) so the emulator re-renders to
-    // fill the surface and the capture matches the 640x360 viewer box exactly.
-    // host.js's cap setter allows 480x270 (aspect kept, MAX_DIM=480).
-    const PIN_W = 480, PIN_H = 270;
+    // updateResizeListeners) to 480x360 (4:3). NOTE: this is the ONLY height the
+    // game will accept — pinning 480x270 makes the game's own resize handler
+    // re-assert its width (~213) every cycle and the watchdog + game fight in an
+    // endless reconfigure loop. 480x360 settles within a few frames. host.js's
+    // cap setter allows it (aspect kept, MAX_DIM=480).
+    const PIN_W = 480, PIN_H = 360;
     let correcting = false;
     function correctSize() {
       const M = window.Module;
