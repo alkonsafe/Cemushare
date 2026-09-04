@@ -72,6 +72,38 @@
 
     if (typeof window.__hostStart === 'function') window.__hostStart();
   };
+
+  // ── Boot diagnostics for the 1920x270 capture investigation ────────────────
+  // Host.js caps the canvas width/height ATTRIBUTES but the presented layer (what
+  // captureStream returns) can still be resized by the game via Emscripten's
+  // setCanvasSize / updateCanvasDimensions, which also writes canvas.style.width/
+  // height with !important (beating our stylesheet). Log what actually changes.
+  (function diag() {
+    const c = document.getElementById('canvas');
+    const snap = (tag) => {
+      const r = c.getBoundingClientRect();
+      console.log('[m64]', tag,
+        'attr=', c.width + 'x' + c.height,
+        'style=', (c.style.width || '-') + '/' + (c.style.height || '-'),
+        'rect=', Math.round(r.width) + 'x' + Math.round(r.height),
+        'dpr=', window.devicePixelRatio,
+        'win=', window.innerWidth + 'x' + window.innerHeight);
+    };
+    snap('booting');
+    for (const ms of [200, 500, 1000, 2000, 3500]) setTimeout(() => snap('t+' + ms), ms);
+    const wrapOnce = setInterval(() => {
+      const M = window.Module;
+      if (M && typeof M.setCanvasSize === 'function' && !M.setCanvasSize.__wrapped) {
+        const orig = M.setCanvasSize;
+        M.setCanvasSize = function (w, h, nu) {
+          console.log('[m64] setCanvasSize', w + 'x' + h);
+          return orig.call(this, w, h, nu);
+        };
+        M.setCanvasSize.__wrapped = true;
+        clearInterval(wrapOnce);
+      }
+    }, 50);
+  })();
 </script>
 <script src="./bin/sm64.js"></script>
 </body>
