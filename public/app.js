@@ -738,17 +738,27 @@ function ensureAvcDescription() {
     return true;
 }
 
-const MAX_DECODE_QUEUE = 32;
+const MAX_DECODE_QUEUE = 8;
 
 function decodeVideo(kind, timestamp, payload) {
     if (!videoDecoder || videoDecoder.state !== 'configured') return;
     const isKey = kind === KIND.VKEY;
-    // Back-pressure: if the decoder queue is very deep, drop under a waiting-for-
-    // keyframe gate so we resync cleanly instead of decoding deltas against a
-    // dropped reference (which causes pixely corruption). Tolerant of small
-    // bursts so brief spikes don't cause visible tearing.
-    if (!isKey && videoDecoder.decodeQueueSize > MAX_DECODE_QUEUE) {
+    const q = videoDecoder.decodeQueueSize;
+    // Back-pressure: keep decode latency bounded by dropping frames when the
+    // decoder queue grows.  Every queued frame adds ~33 ms of latency at 30
+    // fps; an MAX_DECODE_QUEUE of 8 caps decode-only lag to ~270 ms.
+    //  - queue > 4: skip delta frames (cheap to drop, expensive to decode)
+    //  - queue > MAX_DECODE_QUEUE: drop everything, seek next keyframe
+    if (q > MAX_DECODE_QUEUE) {
+        // Decoder is overwhelmed — reset drops ALL queued work (old frames)
+        // instantly so we resync on the incoming keyframe instead of decoding
+        // 8+ stale frames behind it. Reset clears the codec state, so we must
+        // wait for a fresh keyframe afterward.
+        try { videoDecoder.reset(); } catch {}
         waitingForKeyframe = true;
+        if (isKey) waitingForKeyframe = false;
+    } else if (q > 4 && !isKey) {
+        // Moderate load — skip deltas to keep latency low.
         return;
     }
     if (waitingForKeyframe && !isKey) return;
