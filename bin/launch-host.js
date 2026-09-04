@@ -124,6 +124,20 @@ function findChromium() {
     return null;
 }
 
+// ── Headless display plumbing ────────────────────────────────────────────────
+// On headless Linux there is often no X server at all. Chromium's ANGLE/GPU
+// process still tries the Vulkan-xcb / SwANGLE display backends and fails with
+// "xcb_connect() failed ... EGL_NOT_INITIALIZED", leaving WebGL contexts null
+// (mario64 then crashes on glGenBuffers). Give it a virtual display via xvfb.
+function xvfbPrefix() {
+    if (process.platform !== 'linux') return null;
+    if (process.env.DISPLAY && process.env.DISPLAY.trim() !== '') return null;
+    // No DISPLAY → look for xvfb-run. Returns an argv prefix if found.
+    const r = spawnSync('which', ['xvfb-run'], { stdio: ['ignore', 'ignore', 'ignore'] });
+    if (r.status === 0) return ['xvfb-run', '-a', '--server-args=-screen 0 1280x800x24'];
+    return null;
+}
+
 // ── Configure the console dir ────────────────────────────────────────────────
 function resolveConsoleDir() {
     const key = consoleKey;
@@ -221,9 +235,14 @@ async function main() {
     const isWin = process.platform === 'win32';
     const glFlags = isWin
         ? ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader']
-        : ['--use-gl=angle', '--use-angle=swiftshader-webgl', '--enable-unsafe-swiftshader'];
+        : ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader'];
 
-    const browser = spawn(chromium, [
+    // With no DISPLAY on Linux, run Chromium under Xvfb so its GPU/WebGL
+    // process has a backend to talk to.
+    const xvfb = xvfbPrefix();
+    if (xvfb) console.log('[host] no DISPLAY → wrapping chromium with xvfb-run');
+
+    const browser = spawn(xvfb ? [...xvfb, chromium] : chromium, [
         '--headless=new',
         '--no-sandbox',
         '--disable-dev-shm-usage',
