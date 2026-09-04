@@ -33,15 +33,65 @@ const RENDER_W = Number(params.get('w') || 480);
 const RENDER_H = Number(params.get('h') || 270);
 
 // ── PIN THE VIEWPORT (must run before the emulator's JS) ────────────────────
+
+let sdlW = 0, sdlH = 0;
+let renderW = RENDER_W, renderH = RENDER_H;
+const MAX_DIM = Math.max(1, Number(params.get('max') || 480));
+
+// Pin a property to a fixed value (getter only).
+// NOTE: currently disabled — pinning window/screen dimensions made mario64 pick
+// a mismatched canvas size (it read the pinned height and paired it with its own
+// width). Keep here for reference / opt-in use.
+/*
 function pin(obj, prop, value) {
     try { Object.defineProperty(obj, prop, { get: () => value, configurable: true }); }
     catch (err) { console.warn('[host] could not pin', prop, err); }
 }
+// Pin a property to a live getter (so window size follows the game's aspect).
+function pinLive(obj, prop, fn) {
+    try { Object.defineProperty(obj, prop, { get: fn, configurable: true }); }
+    catch (err) { console.warn('[host] could not pin', prop, err); }
+}
+*/
 
-let sdlW = 0, sdlH = 0;
-let renderW = RENDER_W, renderH = RENDER_H;
+// ── UN-THROTTLE THE EMULATOR LOOP ─────────────────────────────────────────────
+// The host is driven by an Emscripten loop that ticks on requestAnimationFrame.
+// Chromium throttles requestAnimationFrame (and delivery) when the page/window
+// is backgrounded or occluded — e.g. the moment you focus/unfocus the launch
+// window — which makes BOTH the game AND audio stutter even with
+// --disable-background-timer-throttling (that flag does NOT cover rAF). To make
+// the loop occlusion-proof we fall back to a timer when the page reports hidden,
+// since timers ARE exempted by that launch flag.
+const nativeRAF = window.requestAnimationFrame.bind(window);
+const nativeCAF = window.cancelAnimationFrame.bind(window);
+const timeoutHandles = new Map();
+// Drive the loop on a short timer instead of rAF. rAF is throttled by Chromium
+// when the page/window is occluded/backgrounded (focusing/unfocusing the launch
+// window), which stalls the emulator and audio. Timers are exempt via the
+// launcher's --disable-background-timer-throttling.
+window.requestAnimationFrame = (cb) => {
+    const id = window.setTimeout(() => { timeoutHandles.delete(id); try { cb(performance.now()); } catch (e) {} }, 4);
+    timeoutHandles.set(id, true);
+    return id;
+};
+window.cancelAnimationFrame = (id) => {
+    if (timeoutHandles.delete(id)) { try { window.clearTimeout(id); } catch (e) {} }
+    else { try { nativeCAF(id); } catch (e) {} }
+};
+// Keep the page reporting as visible so Emscripten stays in its active fast path
+// and does not self-pause its main loop when the window loses focus.
+try {
+    Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
+    Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
+    const evt = () => {};
+    document.addEventListener('visibilitychange', evt);
+} catch (e) {}
 
-// Clamp the game canvas + scale the GL viewport so we render small (fast).
+// Keep the game's canvas at its own (capped) size while PRESERVING its aspect
+// ratio, using ONLY the dimensions the game requests. IMPORTANT: never call
+// canvas.getContext(...) in here — poking the context can make Emscripten's own
+// getContext('webgl') return null later, which leaves GLctx undefined and the
+// emulator aborts on glGenBuffers (seen with mario64's classic-GL build).
 for (const prop of ['width', 'height']) {
     const desc = Object.getOwnPropertyDescriptor(HTMLCanvasElement.prototype, prop);
     Object.defineProperty(HTMLCanvasElement.prototype, prop, {
@@ -49,10 +99,14 @@ for (const prop of ['width', 'height']) {
         get() { return desc.get.call(this); },
         set(v) {
             if (this.dataset && this.dataset.hostCanvas !== '1') return desc.set.call(this, v);
-            if (prop === 'width') { if (v > 1) sdlW = v; return desc.set.call(this, renderW); }
-            if (v > 1) sdlH = v;
-            if (sdlW > 1 && sdlH > 1) renderH = Math.round(renderW * (sdlH / sdlW));
-            return desc.set.call(this, renderH);
+            if (prop === 'width') { if (v > 1) sdlW = v; } else if (v > 1) { sdlH = v; }
+            if (sdlW > 1 && sdlH > 1) {
+                const s = Math.min(1, MAX_DIM / Math.max(sdlW, sdlH));
+                renderW = Math.max(1, Math.round(sdlW * s));
+                renderH = Math.max(1, Math.round(sdlH * s));
+                return desc.set.call(this, prop === 'width' ? renderW : renderH);
+            }
+            return desc.set.call(this, v);
         },
     });
 }
@@ -63,8 +117,11 @@ function installGlScaling(proto) {
         const orig = proto[fn];
         if (!orig) continue;
         proto[fn] = function (x, y, w, h) {
-            if (sdlW > 1 && this.canvas && this.canvas._hostCanvas) {
-                const s = this.drawingBufferWidth / sdlW;
+            // The game's viewport coords are in its REQUESTED canvas space
+            // (sdlW/sdlH). If we capped the canvas to renderW (preserving aspect),
+            // scale those coords onto the actual canvas so the picture fills it.
+            if (sdlW > 1 && sdlH > 1 && this.canvas && this.canvas._hostCanvas) {
+                const s = renderW / sdlW;
                 return orig.call(this, Math.round(x * s), Math.round(y * s),
                                        Math.round(w * s), Math.round(h * s));
             }
@@ -75,12 +132,12 @@ function installGlScaling(proto) {
 installGlScaling(window.WebGLRenderingContext && WebGLRenderingContext.prototype);
 installGlScaling(window.WebGL2RenderingContext && WebGL2RenderingContext.prototype);
 
-pin(window, 'innerWidth', RENDER_W);
-pin(window, 'innerHeight', RENDER_H);
-pin(window.screen, 'width', RENDER_W);
-pin(window.screen, 'height', RENDER_H);
-pin(window.screen, 'availWidth', RENDER_W);
-pin(window.screen, 'availHeight', RENDER_H);
+// Expose the aspect-corrected render size (kept 4:3 for mario64 etc.), not a
+// Do NOT pin window/screen dimensions. Pinning innerHeight made the game choose
+// a mismatched canvas size (e.g. 1920x270): it read the pinned height and paired
+// it with its own computed width. Let the game see the real window and pick its
+// own canvas; the width/height setter above then caps it to MAX_DIM while
+// preserving aspect.
 
 const KIND = { VCONF: 1, VKEY: 2, VDELTA: 3, ACONF: 4, ACHUNK: 5 };
 
@@ -111,24 +168,50 @@ function sendMedia(kind, timestamp, chunkBytes) {
 (function patchAudioContext() {
     const Native = window.AudioContext || window.webkitAudioContext;
     if (!Native) return;
+    const live = new Set();
+    window.__hostAudioContexts = live;
     class HostAudioContext extends Native {
         constructor(...args) {
             super(...args);
+            live.add(this);
             let sink = null;
             try { sink = this.createMediaStreamDestination(); capturedAudioStream = sink.stream; }
             catch (err) { console.warn('[host] audio capture unavailable', err); }
-            if (sink) Object.defineProperty(this, 'destination', { get: () => sink, configurable: true });
+            if (sink) {
+                Object.defineProperty(this, 'destination', { get: () => sink, configurable: true });
+                // Keep the sink fed so the capture stream stays active AND so the
+                // context is treated as "audible"/running (Chromium throttles
+                // ScriptProcessorNode/onaudioprocess when a context has no active
+                // output, which starves mario64's audio when the window is occluded).
+                try { const g = this.createGain(); g.gain.value = 0; g.connect(sink); } catch (e) {}
+            }
         }
     }
     window.AudioContext = HostAudioContext;
     window.webkitAudioContext = HostAudioContext;
+
+    // Occlusion can make Chromium SUSPEND the AudioContext (or stop firing
+    // onaudioprocess), which underruns the emulator's audio. Proactively resume.
+    let prevHidden;
+    setInterval(() => {
+        const hidden = !!(document.hidden && document.hidden === true);
+        if (hidden !== prevHidden) { prevHidden = hidden; if (hidden) log('page hidden — keeping audio context alive'); }
+        for (const ctx of live) {
+            try { if (ctx.state && ctx.state !== 'running') { ctx.resume().catch(() => {}); } } catch (e) {}
+        }
+    }, 500);
 })();
 
 // ── VIDEO ENCODE ─────────────────────────────────────────────────────────────
+// PREFER VP8: the browser's WebCodecs VP8 decoder decodes inline keyframes with
+// no avcC description, whereas avc1/H.264 in Chrome/Edge silently no-ops (or
+// throws) unless you ship a perfectly-formed description. VP8 keeps the whole
+// encode->relay->decode path dependency-free and therefore reliable. avc1 is
+// kept as a secondary option where the payload is more constrained.
 const CODEC_CANDIDATES = [
+    { codec: 'vp8' },
     { codec: 'avc1.42001f', avc: { format: 'annexb' } },
     { codec: 'avc1.42E01E', avc: { format: 'annexb' } },
-    { codec: 'vp8' },
     { codec: 'vp09.00.10.08' },
 ];
 

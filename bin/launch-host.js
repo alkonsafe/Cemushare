@@ -225,6 +225,11 @@ async function main() {
         '--disable-background-timer-throttling',
         '--disable-backgrounding-occluded-windows',
         '--disable-renderer-backgrounding',
+        // Disable native-window occlusion detection: without this, Windows
+        // reports the headless host window as "occluded" when the viewer window
+        // takes focus, which throttles rAF/MediaStream and slows the emulator
+        // (game + audio stutter). This is the flag that actually stops that.
+        '--disable-features=CalculateNativeWinOcclusion',
         '--hide-scrollbars',
         '--disable-gpu-vsync',
         '--disable-frame-rate-limit',

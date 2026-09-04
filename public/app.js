@@ -20,6 +20,7 @@ function goHome() {
 }
 
 function sanitizeImageUrl(url) {
+    if (!url) return 'no.png';
     try {
         const parsed = new URL(url, window.location.origin)
 
@@ -669,40 +670,72 @@ async function configureVideo(config) {
         return;
     }
 
-    videoDecoder = new VideoDecoder({
-        output: (videoFrame) => {
-            if (window.__dbgOutput === undefined) window.__dbgOutput = 0;
-            window.__dbgOutput++;
-            if (window.__dbgOutput <= 3 || window.__dbgOutput % 25 === 0) {
-                console.log('[decoder OUTPUT]', videoFrame.displayWidth, 'x', videoFrame.displayHeight, 'count=', window.__dbgOutput);
+    __decoderOutputFn = (videoFrame) => {
+        if (window.__dbgOutput === undefined) window.__dbgOutput = 0;
+        window.__dbgOutput++;
+        if (window.__dbgOutput <= 3 || window.__dbgOutput % 25 === 0) {
+            console.log('[decoder OUTPUT]', videoFrame.displayWidth, 'x', videoFrame.displayHeight, 'count=', window.__dbgOutput);
+        }
+        try {
+            if (canvas.width !== videoFrame.displayWidth || canvas.height !== videoFrame.displayHeight) {
+                canvas.width = videoFrame.displayWidth;
+                canvas.height = videoFrame.displayHeight;
+                ctx = canvas.getContext('2d');
+                ctx.imageSmoothingEnabled = false; // crisp retro pixels, no blur/tear-smear
             }
-            try {
-                if (canvas.width !== videoFrame.displayWidth || canvas.height !== videoFrame.displayHeight) {
-                    canvas.width = videoFrame.displayWidth;
-                    canvas.height = videoFrame.displayHeight;
-                    ctx = canvas.getContext('2d');
-                    ctx.imageSmoothingEnabled = false; // crisp retro pixels, no blur/tear-smear
-                }
-                ctx.drawImage(videoFrame, 0, 0);
-            } catch (err) {
-                console.error('[decoder DRAW ERROR]', err);
-            }
-            videoFrame.close();
-            setStreamStatus(''); // writerout
-            if (window.__dbgOutput === 3) setStreamStatus('Frames rendering (' + window.__dbgOutput + ')');
-        },
-        error: (e) => {
-            console.error('[decoder ERROR]', e);
-            waitingForKeyframe = true;
-            setStreamStatus('decode error — waiting for keyframe');
-            if (decoderConfig) {
-                try { videoDecoder.configure(decoderConfig); } catch {}
-            }
-        },
-    });
+            ctx.drawImage(videoFrame, 0, 0);
+        } catch (err) {
+            console.error('[decoder DRAW ERROR]', err);
+        }
+        videoFrame.close();
+        setStreamStatus('');
+        if (window.__dbgOutput === 3) setStreamStatus('Frames rendering (' + window.__dbgOutput + ')');
+    };
+    __decoderErrorFn = (e) => {
+        console.error('[decoder ERROR]', e);
+        waitingForKeyframe = true;
+        setStreamStatus('decode error — waiting for keyframe');
+        if (decoderConfig) {
+            try { videoDecoder.configure(decoderConfig); } catch {}
+        }
+    };
+
+    videoDecoder = new VideoDecoder({ output: __decoderOutputFn, error: __decoderErrorFn });
     videoDecoder.configure(decoderConfig);
     waitingForKeyframe = true;
+    // Only avc1/H.264 needs a hand-built avcC description if the host sent none
+    // (Edge omits it). VP8/VP9 decode with inline keyframes, no description.
+    needAvcDescription = !decoderConfig.description && /^avc/.test(decoderConfig.codec);
     if (streamWs && streamWs.readyState === 1) streamWs.send(JSON.stringify({ t: 'needkey' }));
+}
+
+// Tracked in configureVideo(); set when the host sent no avcC description and we
+// must extract SPS/PPS from the first keyframe to build one.
+let needAvcDescription = false;
+let __decoderOutputFn = null, __decoderErrorFn = null;
+let __lastKeyframePayload = null;
+function ensureAvcDescription() {
+    if (!needAvcDescription || !decoderConfig) return false;
+    const nals = annexBNals(__lastKeyframePayload);
+    if (!nals) return false;
+    let sps = null, pps = null;
+    for (const nal of nals) {
+        if (nal.type === 7 && !sps) sps = nal.bytes;
+        else if (nal.type === 8 && !pps) pps = nal.bytes;
+    }
+    __lastKeyframePayload = null;
+    if (!sps || !pps) { console.warn('[decoder] keyframe had no SPS/PPS'); return false; }
+    decoderConfig.description = buildAvcDescription(sps, pps);
+    needAvcDescription = false;
+    console.log('[decoder] built avcC description from keyframe (' + sps.length + '/' + pps.length + ' bytes) — reconfiguring');
+    console.log('[decoder] SPS[0..3]=', Array.from(sps.slice(0, 4)), ' PPS=', Array.from(pps));
+    try { if (videoDecoder && videoDecoder.state !== 'closed') videoDecoder.close(); } catch {}
+    try { videoDecoder = new VideoDecoder({ output: __decoderOutputFn, error: __decoderErrorFn }); videoDecoder.configure(decoderConfig); } catch (e) { console.error('[decoder] reconfigure failed', e); return false; }
+    waitingForKeyframe = true;
+    // Request a fresh keyframe so we decode a clean IDR, not the in-flight one
+    // (its SPS/PPS were just consumed to build the description).
+    if (streamWs && streamWs.readyState === 1) streamWs.send(JSON.stringify({ t: 'needkey' }));
+    return true;
 }
 
 const MAX_DECODE_QUEUE = 32;
@@ -719,15 +752,31 @@ function decodeVideo(kind, timestamp, payload) {
         return;
     }
     if (waitingForKeyframe && !isKey) return;
-    if (isKey) waitingForKeyframe = false;
+    if (isKey) {
+        waitingForKeyframe = false;
+        if (needAvcDescription) {
+            // Host sent no avcC description (Edge omits it for avc1). Pull the
+            // SPS/PPS out of this keyframe, build the description, and
+            // reconfigure once. Return early: wait for the freshly requested
+            // keyframe instead of decoding this in-flight one.
+            __lastKeyframePayload = payload;
+            if (ensureAvcDescription()) return;
+        }
+    }
     try {
-        // Convert annex-B to avcC (4-byte length prefixes), matching the
-        // description's lengthSizeMinusOne(0xFF)=4. Now that the SPS is valid
-        // (0x67 header intact), the description is correct and Chrome decodes.
-        const data = annexBToAvcC(payload);
+        let data;
+        if (decoderConfig && decoderConfig.codec && /^avc/.test(decoderConfig.codec)) {
+            // H.264: convert annex-B to avcC (4-byte length prefixes). When the
+            // decoder has an avcC description, drop redundant inline SPS/PPS/SEI.
+            const clean = isKey && decoderConfig.description ? stripParamSets(payload) : payload;
+            data = annexBToAvcC(clean || payload);
+        } else {
+            // VP8/VP9/AV1: feed the raw chunk; no annex-B conversion or description.
+            data = payload;
+        }
         if (window.__dbgCount === undefined) window.__dbgCount = 0;
         if (window.__dbgCount++ < 15) {
-            console.log(`[decode] rawKind=${kind} type=${isKey ? 'key' : 'delta'} payload=${payload.length} converted=${data.length} nals=${countNals(payload)} ts=${timestamp} q=${videoDecoder.decodeQueueSize}`);
+            console.log(`[decode] rawKind=${kind} type=${isKey ? 'key' : 'delta'} payload=${payload.length} feed=${data.length} codec=${decoderConfig && decoderConfig.codec} ts=${timestamp} q=${videoDecoder.decodeQueueSize}`);
         }
         videoDecoder.decode(new EncodedVideoChunk({ type: isKey ? 'key' : 'delta', timestamp, data }));
         if (isKey) scheduleNoOutputCheck();
@@ -820,6 +869,86 @@ function annexBToAvcC(payload) {
     let o = 0;
     for (const c of out) { result.set(c, o); o += c.length; }
     return result;
+}
+
+// Split an annex-b H.264 buffer into NAL units (each WITHOUT start code) so we
+// can pull the SPS (type 7) / PPS (type 8) out of a keyframe.
+function annexBNals(payload) {
+    const data = payload;
+    const n = data.length;
+    const nals = [];
+    let i = 0;
+    while (i + 3 < n) {
+        let sc = 0;
+        if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1 && (i + 3 === n || data[i + 3] !== 0)) sc = 3;
+        else if (i + 4 < n && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) sc = 4;
+        if (!sc) { i++; continue; }
+        const start = i + sc;
+        let j = start;
+        while (j + 3 < n) {
+            if (data[j] === 0 && data[j + 1] === 0 && data[j + 2] === 1 && (j + 3 === n || data[j + 3] !== 0)) break;
+            if (j + 4 < n && data[j] === 0 && data[j + 1] === 0 && data[j + 2] === 0 && data[j + 3] === 1) break;
+            j++;
+        }
+        nals.push({ type: data[start] & 0x1f, bytes: data.slice(start, j) });
+        i = j;
+    }
+    return nals;
+}
+
+// Build an avcC "description" blob from SPS + PPS NALs so the browser's avc1
+// VideoDecoder can be configured with it (needed when the host's keyframes carry
+// SPS/PPS inline but the encoder never emitted a decoderConfig description —
+// which is exactly what Edge does for avc1).
+function buildAvcDescription(sps, pps) {
+    const out = [];
+    const u16 = (v) => { out.push(v >> 8 & 0xff, v & 0xff); };
+    // profile/compat/level copied from the SPS so Edge's strict validation of
+    // the description against the SPS doesn't reject it.
+    out.push(0x01, sps[0] || 0, sps[1] || 0, sps[2] || 0);  // version, profile, compat, level
+    out.push(0xfc | 0x03);              // lengthSizeMinusOne = 3 (4-byte lengths)
+    out.push(0xe0 | 1);                 // 1 SPS
+    u16(sps.length); for (const b of sps) out.push(b);
+    out.push(1);                        // 1 PPS
+    u16(pps.length); for (const b of pps) out.push(b);
+    return new Uint8Array(out);
+}
+
+// Remove SPS(type 7)/PPS(type 8)/SEI(type 6) NALs from an annex-b buffer,
+// preserving the exact bytes (start code + body) of everything else. Once the
+// decoder has an avcC description, carrying SPS/PPS inline too can confuse
+// strict decoders, so we drop only those and keep the IDR as the encoder made it.
+function stripParamSets(payload) {
+    const data = payload;
+    const n = data.length;
+    const nals = [];
+    let i = 0;
+    while (i + 3 < n) {
+        let sc = 0;
+        if (data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 1 && (i + 3 === n || data[i + 3] !== 0)) sc = 3;
+        else if (i + 4 < n && data[i] === 0 && data[i + 1] === 0 && data[i + 2] === 0 && data[i + 3] === 1) sc = 4;
+        if (!sc) { i++; continue; }
+        const bodyStart = i + sc;
+        let j = bodyStart;
+        while (j + 3 < n) {
+            const is3 = data[j] === 0 && data[j + 1] === 0 && data[j + 2] === 1 && (j + 3 === n || data[j + 3] !== 0);
+            const is4 = j + 4 < n && data[j] === 0 && data[j + 1] === 0 && data[j + 2] === 0 && data[j + 3] === 1;
+            if (is3 || is4) break;
+            j++;
+        }
+        nals.push({ type: data[i + sc] & 0x1f, from: i, bodyStart, end: j });
+        i = j;
+    }
+    const keep = nals.filter((s) => s.type !== 7 && s.type !== 8 && s.type !== 6);
+    if (keep.length === nals.length || keep.length === 0) return payload;
+    const out = [];
+    for (let k = 0; k < keep.length; k++) {
+        const s = keep[k];
+        // start code bytes [from, bodyStart) + body bytes [bodyStart, end)
+        out.push(...data.slice(s.from, s.bodyStart));
+        out.push(...data.slice(s.bodyStart, s.end));
+    }
+    return new Uint8Array(out);
 }
 
 // ── Audio decoding (WebCodecs + Web Audio) ───────────────────────────────────

@@ -274,7 +274,11 @@ function serveStatic(req, res) {
             'Content-Type': MIME[ext] || 'application/octet-stream',
             'Access-Control-Allow-Origin': '*',
             'Cross-Origin-Resource-Policy': 'cross-origin',
-            'Cache-Control': ext === '.html' ? 'no-store, must-revalidate' : 'public, max-age=3600',
+            // No-cache the html/js/json so viewer edits appear on reload during dev;
+            // only immutable media/images keep a short cache.
+            'Cache-Control': ['.js', '.mjs', '.json', '.html'].includes(ext)
+                ? 'no-cache, must-revalidate'
+                : 'public, max-age=3600',
         }).end(data);
     });
 }

@@ -64,6 +64,12 @@ moment it connects. Run `npm run host-console -- --help` for all options
 (`--w --h --fps --bitrate --port --profile`), or `--interactive` to be prompted.
 Set `CHROME_BIN` to a specific Chrome/Edge path if the auto-detector misses it.
 
+> **⚠ Hosting on Windows is currently buggy and unsupported right now.** The
+> headless host's software-GL emulator is heavily throttled/starved whenever any
+> other GPU-heavy Chromium window is foregrounded (the viewer, Discord, etc.),
+> causing game + audio stutter. It's a Windows-specific occlusion/contention
+> quirk. Use Linux/Docker for reliable hosting; the viewer works fine anywhere.
+
 For the server to accept remote hosts it must be reachable over the network
 (it already binds `0.0.0.0`) and you must share `EMULATOR_HOST_TOKEN`.
 
