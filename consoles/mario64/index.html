@@ -4,8 +4,25 @@
 <meta charset="utf-8">
 <title>emulatorSHARE — Mario 64 host</title>
 <style>
-  html, body { margin: 0; background: #000; overflow: hidden; }
-  #canvas { display: block; background: #000; image-rendering: pixelated; }
+  html, body {
+    margin: 0;
+    background: #000;
+    overflow: hidden;
+    height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  #canvas {
+    display: block;
+    max-width: 100vw;
+    max-height: 100vh;
+    width: auto;
+    height: auto;
+    image-rendering: pixelated;
+  }
+
   #boot { position: fixed; left: 8px; top: 8px; color: #6f6; font: 12px monospace; z-index: 9; }
 </style>
 <!-- host.js FIRST as a classic script, BEFORE the emulator bundle. It installs
