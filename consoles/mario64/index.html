@@ -80,8 +80,23 @@
   // height with !important (beating our stylesheet). Log what actually changes.
   (function diag() {
     const c = document.getElementById('canvas');
+
+    const glInfo = (M) => {
+      try {
+        const cv = M && M.canvas;
+        const g = cv && cv.GLctxObject && cv.GLctxObject.GLctx;
+        if (!g) return 'gl=-  buf=-x-';
+        const vp = g.getParameter(0x0BA2);
+        const vps = vp ? Array.from(vp).join('x') : '-';
+        return 'glview=' + vps + '  buf=' + g.drawingBufferWidth + 'x' + g.drawingBufferHeight;
+      } catch (e) { return 'gl=err'; }
+    };
+
     const snap = (tag) => {
+      const M = window.Module;
       const r = c.getBoundingClientRect();
+      const wn = (window.Browser && Browser.windowedWidth) ? Browser.windowedWidth + 'x' + Browser.windowedHeight : '0';
+      const nw = (M && M.canvas) ? (M.canvas.widthNative || '-') + 'x' + (M.canvas.heightNative || '-') : '-';
       console.log('[m64]', tag,
         'attr=', c.width + 'x' + c.height,
         'style=', (c.style.width || '-') + '/' + (c.style.height || '-'),
@@ -89,9 +104,38 @@
         'dpr=', window.devicePixelRatio,
         'win=', window.innerWidth + 'x' + window.innerHeight,
         'cli=', document.documentElement.clientWidth + 'x' + document.documentElement.clientHeight,
-        'scr=', screen.width + 'x' + screen.height);
+        'scr=', screen.width + 'x' + screen.height,
+        'nw=', nw, 'wn=', wn, glInfo(M));
     };
     snap('booting');
+
+    // Trace setAttribute('width'/'height') writes specifically: host.js's
+    // prototype-cap only guards the PROPERTY path (canvas.width = v), so if the
+    // game writes the attrs via setAttribute we see it exactly here.
+    const _origSetAttr = c.setAttribute.bind(c);
+    c.setAttribute = function (k, v) {
+      if ((k === 'width' || k === 'height') && v !== undefined && v !== null) {
+        const oldV = k === 'width' ? c.width : c.height;
+        console.log('[m64] setAttribute', k, oldV, '->', v, 't=' + Math.round(performance.now()) + 'ms');
+      }
+      return _origSetAttr(k, v);
+    };
+
+    // Does the game react to a REAL window resize (its own JSEvents resize
+    // handler recomputing canvas + GL viewport)? 800x700 lands inner ~4:3 given
+    // the ~+20/-87 window-chrome offset seen with --window-size=480,270.
+    window.addEventListener('resize', () =>
+      console.log('[m64] window resize event -> win=' + window.innerWidth + 'x' + window.innerHeight));
+    setTimeout(() => {
+      const before = window.innerWidth + 'x' + window.innerHeight;
+      let ok = false, err = null;
+      try { window.resizeTo(800, 700); ok = true; } catch (e) { err = (e && e.message) || String(e); }
+      console.log('[m64] resizeTo(800,700) before=' + before + ' ok=' + ok + ' err=' + err);
+      setTimeout(() => {
+        console.log('[m64] after resizeTo win=' + window.innerWidth + 'x' + window.innerHeight);
+        snap('post-resize');
+      }, 300);
+    }, 1200);
 
     // Catch EVERY attribute change on the canvas regardless of how it was
     // written (property setter vs setAttribute) — host.js's prototype cap only
@@ -109,7 +153,7 @@
         if (m.attributeName === 'width' || m.attributeName === 'height') {
           const r = c.getBoundingClientRect();
           console.log('[m64]   after:', 'attr=', c.width + 'x' + c.height,
-            'rect=', Math.round(r.width) + 'x' + Math.round(r.height));
+            'rect=', Math.round(r.width) + 'x' + Math.round(r.height), glInfo(window.Module));
         }
       }
     });
@@ -117,7 +161,7 @@
       attrWatch.observe(c, { attributes: true, attributeOldValue: true,
         attributeFilter: ['width', 'height', 'style'] });
     } catch (e) { console.error('[m64] attrWatch failed:', e); }
-    for (const ms of [200, 500, 1000, 2000, 3500]) setTimeout(() => snap('t+' + ms), ms);
+    for (const ms of [200, 500, 900, 1100, 1500, 2000, 3500, 5500]) setTimeout(() => snap('t+' + ms), ms);
 
     // ── Size watchdog ──────────────────────────────────────────────────────
     // The game boots its canvas at 320x240, then during init grows it to
