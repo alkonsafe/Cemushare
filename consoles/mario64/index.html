@@ -148,60 +148,49 @@
     for (const ms of [200, 500, 900, 1100, 1500, 2000, 3500, 5500]) setTimeout(() => snap('t+' + ms), ms);
 
     // ── Size watchdog ──────────────────────────────────────────────────────
-    // The game boots its canvas at 320x240, then during init grows it to
-    // 1920x270 (a mismatch it computes itself). At 1920x270 the picture is a
-    // stretched horizontal strip; if we only shrink the canvas ATTRIBUTES the
-    // game still renders at its own size and we see a zoomed corner. So re-drive
-    // its own resize API (setCanvasSize -> updateCanvasDimensions +
-    // updateResizeListeners) to 480x360 (4:3). NOTE: this is the ONLY height the
-    // game will accept — pinning 480x270 makes the game's own resize handler
-    // re-assert its width (~213) every cycle and the watchdog + game fight in an
-    // endless reconfigure loop. 480x360 settles within a few frames. host.js's
-    // cap setter allows it (aspect kept, MAX_DIM=480).
-    const PIN_W = 480, PIN_H = 360;
-    let correcting = false;
+    // The game boots its canvas at 320x240, then during init grows it to its own
+    // reference size (1920x270 at boot, 1920x1080 after a resize). We want 16:9
+    // to match the 640x360 viewer box exactly.
+    //
+    // IMPORTANT: we deliberately do NOT use Module.setCanvasSize here. That path
+    // fires the game's resize listeners, and the game's own resize handler then
+    // re-asserts ITS computed width — pinning 480x270 made it re-assert ~213
+    // forever (the endless reconfigure loop). Writing the canvas ATTRIBUTES via
+    // the property path (c.width = v) sends no resize event, so the game never
+    // fights back; the GL viewport wrapper below then forces the raster to the
+    // real buffer, so the full frame surfaces instead of a corner/second strip.
+    // host.js's cap setter may downscale 640x360 -> 480x270 — same 16:9 aspect.
+    const GOAL_W = 640, GOAL_H = 360;
+    let _lastW = 0, _lastH = 0;
     function correctSize() {
-      const M = window.Module;
-      if (!M || typeof M.setCanvasSize !== 'function') return;
-      if (correcting) return;
-      if (c.width === PIN_W && c.height === PIN_H) return;
-      correcting = true;
+      if (_lastW && c.width === _lastW && c.height === _lastH) return; // stable
+      const prev = c.width + 'x' + c.height;
       try {
-        console.log('[m64] setCanvasSize(' + PIN_W + ',' + PIN_H + ') ' +
-          'from attr ' + c.width + 'x' + c.height);
-        M.setCanvasSize(PIN_W, PIN_H);
-      } catch (err) { console.error('[m64] setCanvasSize failed:', err); }
-      finally { correcting = false; }
+        c.height = GOAL_H;           // set height first so any host.js cap keeps 16:9
+        c.width = GOAL_W;            // last write wins; game gets no resize event
+      } catch (err) { console.error('[m64] canvas resize failed:', err); return; }
+      _lastW = c.width;
+      _lastH = c.height;
+      console.log('[m64] canvas ' + prev + ' -> ' + _lastW + 'x' + _lastH);
     }
     setInterval(correctSize, 100);
     setTimeout(correctSize, 400);
     setTimeout(correctSize, 1000);
     setTimeout(correctSize, 2000);
-    const wrapOnce = setInterval(() => {
-      const M = window.Module;
-      if (M && typeof M.setCanvasSize === 'function' && !M.setCanvasSize.__wrapped) {
-        const orig = M.setCanvasSize;
-        M.setCanvasSize = function (w, h, nu) {
-          console.log('[m64] setCanvasSize', w + 'x' + h);
-          return orig.call(this, w, h, nu);
-        };
-        M.setCanvasSize.__wrapped = true;
-        clearInterval(wrapOnce);
-      }
-    }, 50);
 
     // ── GL viewport fix ────────────────────────────────────────────────────
     // The game re-anchors its GL viewport to its own reference size (1920x1080)
-    // whenever the canvas resizes, which is LARGER than our 480x360 canvas, so
-    // WebGL clips the render to the buffer and we see only a corner. Force every
-    // gl.viewport call ourselves. The game presents its frame with its own aspect
-    // assumption, so we expose non-uniform X/Y scale knobs (m64zx/m64zy URL
-    // params, defaults below) plus an X/Y pan (m64ox/m64oy) to reshape the
-    // picture: viewport bigger than the canvas on an axis crops/zooms that axis,
+    // whenever the canvas resizes, which is LARGER than the real canvas, so
+    // WebGL clips the render and we see only a corner. Force every gl.viewport
+    // call to the canvas's CURRENT buffer (re-read each call, so it tracks
+    // watchdog resizes too). Defaults zx=zy=1 => viewport exactly the buffer =
+    // full uncropped frame; the game's 16:9 world matches the 16:9 canvas, so no
+    // reshaping is needed. m64zx/m64zy (scale) and m64ox/m64oy (pan) remain as
+    // URL overrides: viewport bigger than the canvas crops/zooms that axis,
     // smaller letterboxes/unzooms it.
     const _m64p = new URLSearchParams(location.search);
-    const _ZX = parseFloat(_m64p.get('m64zx') || '0.5');   // >1 = zoom-in on X
-    const _ZY = parseFloat(_m64p.get('m64zy') || '3');   // <1 = unzoom on Y
+    const _ZX = parseFloat(_m64p.get('m64zx') || '1');   // >1 = zoom-in on X, <1 = unzoom
+    const _ZY = parseFloat(_m64p.get('m64zy') || '1');   // >1 = zoom-in on Y, <1 = unzoom
     const _OX = parseFloat(_m64p.get('m64ox') || '0');
     const _OY = parseFloat(_m64p.get('m64oy') || '0');
     console.log('[m64] viewport knobs zx=' + _ZX + ' zy=' + _ZY + ' ox=' + _OX + ' oy=' + _OY);
