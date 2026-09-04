@@ -1179,13 +1179,13 @@ function addChatMessage(username, message, isServer = false, isSelf = false, pfp
     messageElement.innerHTML = `
         <div class="flex items-baseline gap-2 flex-1">
             <span class="font-bold text-[#E9E9E9] text-sm text-blue-400 hover:underline cursor-pointer">
-                ${username}
+                ${escapeHtml(username)}
             </span>
             
             <span class="text-black dark:text-white text-xs">▶</span>
             
             <span class="text-gray-900 dark:text-gray-100 text-sm flex-1 break-words max-w-[70%] lg:max-w-[400px]">
-                ${message}
+                ${escapeHtml(message)}
             </span>
         </div>
     `;
