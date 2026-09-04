@@ -121,22 +121,6 @@
       return _origSetAttr(k, v);
     };
 
-    // Does the game react to a REAL window resize (its own JSEvents resize
-    // handler recomputing canvas + GL viewport)? 800x700 lands inner ~4:3 given
-    // the ~+20/-87 window-chrome offset seen with --window-size=480,270.
-    window.addEventListener('resize', () =>
-      console.log('[m64] window resize event -> win=' + window.innerWidth + 'x' + window.innerHeight));
-    setTimeout(() => {
-      const before = window.innerWidth + 'x' + window.innerHeight;
-      let ok = false, err = null;
-      try { window.resizeTo(800, 700); ok = true; } catch (e) { err = (e && e.message) || String(e); }
-      console.log('[m64] resizeTo(800,700) before=' + before + ' ok=' + ok + ' err=' + err);
-      setTimeout(() => {
-        console.log('[m64] after resizeTo win=' + window.innerWidth + 'x' + window.innerHeight);
-        snap('post-resize');
-      }, 300);
-    }, 1200);
-
     // Catch EVERY attribute change on the canvas regardless of how it was
     // written (property setter vs setAttribute) — host.js's prototype cap only
     // intercepts the property path, so a 1920x270 along a different path would
@@ -203,6 +187,28 @@
         clearInterval(wrapOnce);
       }
     }, 50);
+
+    // ── GL viewport fix ────────────────────────────────────────────────────
+    // The game re-anchors its GL viewport to its own reference size (1920x1080)
+    // whenever the canvas resizes, which is LARGER than our 480x360 canvas, so
+    // WebGL clips the render to the buffer and we see only a corner. Force every
+    // gl.viewport to the full canvas drawing buffer: classic-GL stretches SM64's
+    // 4:3 framebuffer to whatever viewport size it's given, so pinning viewport
+    // == canvas turns the corner into the whole picture at 4:3.
+    const _vpTimer = setInterval(() => {
+      const M = window.Module;
+      const cv = M && M.canvas;
+      const g = cv && cv.GLctxObject && cv.GLctxObject.GLctx;
+      if (!g || g.viewport.__m64Fixed) return;
+      const orig = g.viewport;
+      g.viewport = function (x, y, w, h) {
+        return orig.call(this, 0, 0, cv.width, cv.height);
+      };
+      g.viewport.__m64Fixed = true;
+      console.log('[m64] viewport wrapper installed on ' + cv.width + 'x' + cv.height);
+      try { orig.call(g, 0, 0, cv.width, cv.height); } catch (e) {}
+      clearInterval(_vpTimer);
+    }, 25);
   })();
 </script>
 <script src="./bin/sm64.js"></script>
