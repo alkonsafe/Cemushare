@@ -36,6 +36,20 @@ const DB_PATH      = process.env.EMULATOR_DB || path.join(DATA_DIR, 'emulatorsha
 const HOST_TOKEN   = process.env.EMULATOR_HOST_TOKEN || '';
 const JWT_SECRET   = process.env.EMULATOR_JWT_SECRET || 'dev-secret-change-me';
 
+// ── Logging ──────────────────────────────────────────────────────────────────
+const LOG_INFO = process.env.EMULATOR_LOG || 'info'; // 'verbose' | 'info' | 'warn' | 'error'
+const LEVELS = { verbose: 0, info: 1, warn: 2, error: 3 };
+function logAt(level, ...a) {
+    if ((LEVELS[level] || 1) < (LEVELS[LOG_INFO] || 1)) return;
+    const ts = new Date().toISOString();
+    const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+    fn(`[${ts}] [${level.toUpperCase().padEnd(7)}]`, ...a);
+}
+const log   = (...a) => logAt('info', ...a);
+const logV  = (...a) => logAt('verbose', ...a);   // noisiest: per-message / per-frame
+const warn  = (...a) => logAt('warn', ...a);
+const error = (...a) => logAt('error', ...a);
+
 // ── Limits ───────────────────────────────────────────────────────────────────
 const MAX_VIEWERS_PER_CONSOLE = 250;
 const MAX_TEXT_FRAME  = 4 * 1024;
@@ -277,11 +291,14 @@ async function handleRegister(req, res) {
     let body; try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { message: 'bad request' }); }
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
-    if (username.length < 3 || username.length > 24 || !/^[A-Za-z0-9_.-]+$/.test(username))
+    if (username.length < 3 || username.length > 24 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
+        logV(`register rejected: bad username "${username}"`);
         return json(res, 400, { message: 'username must be 3-24 chars: letters, numbers, _ . -' });
-    if (password.length < 6) return json(res, 400, { message: 'password must be at least 6 characters' });
-    if (qUserByName.get(username)) return json(res, 409, { message: 'username already taken' });
+    }
+    if (password.length < 6) { logV(`register rejected: short password for "${username}"`); return json(res, 400, { message: 'password must be at least 6 characters' }); }
+    if (qUserByName.get(username)) { logV(`register rejected: username taken "${username}"`); return json(res, 409, { message: 'username already taken' }); }
     qCreateUser.run(username, hashPassword(password), Date.now());
+    log(`auth: registered new user "${username}"`);
     return json(res, 200, { message: 'registered' });
 }
 
@@ -291,12 +308,15 @@ async function handleLogin(req, res) {
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
     const user = qUserByName.get(username);
-    if (!user || !verifyPassword(password, user.password_hash))
+    if (!user || !verifyPassword(password, user.password_hash)) {
+        warn(`auth: failed login for "${username}"`);
         return json(res, 401, { message: 'invalid username or password' });
+    }
 
     const ttl = 14 * 24 * 60 * 60 * 1000; // 14 days
     const token = makeToken({ sub: user.id, username: user.username }, ttl);
     qInsertSession.run(token, user.id, Date.now(), Date.now() + ttl);
+    log(`auth: "${user.username}" logged in (id=${user.id})`);
     return json(res, 200, {
         token,
         user: { id: user.id, username: user.username },
@@ -310,6 +330,8 @@ function consoleGridToClient() {
 
 const server = http.createServer(async (req, res) => {
     const url = (req.url || '/').split('?')[0];
+    const start = Date.now();
+    res.on('finish', () => logV(`http ${req.method} ${url} -> ${res.statusCode} (${Date.now() - start}ms)`));
     try {
         if (url === '/api/register') return handleRegister(req, res);
         if (url === '/api/login') return handleLogin(req, res);
@@ -377,7 +399,8 @@ function attachHost(ws, consoleParam) {
     let cons = consoles.get(consoleKey) || null;
     if (cons && cons.hostSock) { try { cons.hostSock.close(4000, 'replaced'); } catch {} }
 
-    console.log(`[host] connecting (console=${consoleKey || '?pending'})`);
+    let sawRegister = false, sawFirstFrame = false;
+    log(`host ws: connected (console=${consoleKey || '?pending'})`);
 
     ws.on('message', (data, isBinary) => {
         if (isBinary) {
@@ -388,6 +411,11 @@ function attachHost(ws, consoleParam) {
             if (kind === KIND.VKEY) { cons.lastKeyframe = Buffer.from(data); cons.stats.frames++; cons.lastVideoAt = now; }
             else if (kind === KIND.VDELTA) { cons.stats.frames++; cons.lastVideoAt = now; }
             cons.stats.bytes += data.length;
+            if (!sawFirstFrame && cons.hostAlive) {
+                sawFirstFrame = true;
+                log(`host "${cons.name}" (${cons.key}): READY — streaming video to viewers`);
+            }
+            logV(`host ${cons.key}: frame kind=${kind} bytes=${data.length}`);
             broadcastBinary(cons, data);
             return;
         }
@@ -397,6 +425,7 @@ function attachHost(ws, consoleParam) {
                 // A host introduces/updates a console. Persist + create live state.
                 const meta = msg.console || {};
                 if (meta.key) consoleKey = String(meta.key).toLowerCase().slice(0, 48);
+                const wasOnline = cons && cons.hostAlive;
                 cons = registerConsole({ ...meta, key: consoleKey, last_seen: Date.now() });
                 if (!cons) return;
                 cons.name = meta.name || consoleKey;
@@ -407,17 +436,27 @@ function attachHost(ws, consoleParam) {
                     cons.lastSentKeys = '';
                     cons.lastVideoAt = Date.now();
                 }
-                console.log(`[host] console "${cons.name}" (${consoleKey}) registered`);
+                sawRegister = true; sawFirstFrame = false;
+                if (!wasOnline) log(`host "${cons.name}" (${consoleKey}): connected & registered, waiting for stream`);
+                else log(`host "${cons.name}" (${consoleKey}): re-registered (was already online)`);
                 qTouchConsole.run(Date.now(), consoleKey);
                 if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'registered', key: consoleKey, name: cons.name }));
                 break;
             }
             default:
                 if (!cons) return;
-                if (msg.t === 'vconfig') { cons.videoConfig = msg.config || null; broadcastJson(cons, { t: 'vconfig', config: cons.videoConfig }); }
-                else if (msg.t === 'aconfig') { cons.audioConfig = msg.config || null; broadcastJson(cons, { t: 'aconfig', config: cons.audioConfig }); }
+                if (msg.t === 'vconfig') {
+                    cons.videoConfig = msg.config || null;
+                    log(`host ${cons.key}: video config ${msg.config ? `${msg.config.codec} ${msg.config.codedWidth}x${msg.config.codedHeight}` : '(null)'}`);
+                    broadcastJson(cons, { t: 'vconfig', config: cons.videoConfig });
+                }
+                else if (msg.t === 'aconfig') {
+                    cons.audioConfig = msg.config || null;
+                    log(`host ${cons.key}: audio config ${msg.config ? `${msg.config.codec} ${msg.config.sampleRate || ''}Hz` : '(null)'}`);
+                    broadcastJson(cons, { t: 'aconfig', config: cons.audioConfig });
+                }
                 else if (msg.t === 'gamestate') broadcastJson(cons, { t: 'gamestate', state: msg.state });
-                else if (msg.t === 'log') console.log(`[host:${cons.key}]`, String(msg.text || '').slice(0, 300));
+                else if (msg.t === 'log') log(`host:${cons.key}]`, String(msg.text || '').slice(0, 300));
                 break;
         }
     });
@@ -427,7 +466,8 @@ function attachHost(ws, consoleParam) {
             cons.hostSock = null;
             cons.hostAlive = false;
             cons.lastKeyframe = null;
-            console.log(`[host] console "${cons.key}" disconnected`);
+            const wasStreaming = sawFirstFrame;
+            log(`host "${cons.key}": disconnected${wasStreaming ? ' (was streaming)' : ''}`);
             broadcastJson(cons, { t: 'host', up: false });
             qTouchConsole.run(Date.now(), cons.key);
         }
@@ -444,6 +484,7 @@ function requestKeyframe(cons) {
     const now = Date.now();
     if (now - (cons.keyframeRequestedAt || 0) < 400) return;
     cons.keyframeRequestedAt = now;
+    logV(`keyframe: requesting keyframe from host "${cons.key}"`);
     sendHost(cons, { t: 'keyframe' });
 }
 
@@ -453,12 +494,14 @@ const nextViewerId = (() => { let n = 0; return () => `v${++n}`; })();
 function attachViewer(ws, consoleParam, user) {
     const cons = resolveConsole(consoleParam);
     if (!cons) {
+        logV(`viewer: rejected — unknown console "${consoleParam}"`);
         ws.send(JSON.stringify({ t: 'welcome', host: false, video: null, audio: null, error: 'unknown-console' }));
         const die = () => { try { ws.close(4004, 'unknown-console'); } catch {} };
         setTimeout(die, 300);
         return;
     }
     if (cons.viewers.size >= MAX_VIEWERS_PER_CONSOLE) {
+        warn(`viewer: rejected — console "${cons.key}" full (${MAX_VIEWERS_PER_CONSOLE})`);
         try { ws.close(4001, 'console-full'); } catch {}
         return;
     }
@@ -474,6 +517,7 @@ function attachViewer(ws, consoleParam, user) {
         joinedAt: Date.now(),
     };
     cons.viewers.set(v.id, v);
+    log(`viewer "${v.username}" (${v.id}) joined console "${cons.key}" (${cons.viewers.size} online)`);
 
     send(v, {
         t: 'welcome',
@@ -495,6 +539,7 @@ function attachViewer(ws, consoleParam, user) {
 
     ws.on('close', () => {
         cons.viewers.delete(v.id);
+        log(`viewer "${v.username}" (${v.id}) left console "${cons.key}" (${cons.viewers.size} online)`);
         if (cons.vote) {
             cons.vote.yes.delete(v.id);
             cons.vote.no.delete(v.id);
@@ -515,6 +560,7 @@ function handleViewerMsg(cons, v, msg) {
             if (msg.mouse) v.mouse = { x: +msg.mouse.x || 0, y: +msg.mouse.y || 0, click: !!msg.mouse.click, button: +msg.mouse.button || 0 };
             v.keys = next;
             v.keysAt = Date.now();
+            if (next.size) logV(`input: ${v.username} keys=[${[...next].join(',')}] console=${cons.key}`);
             break;
         }
         case 'chat': {
@@ -523,12 +569,14 @@ function handleViewerMsg(cons, v, msg) {
             v.lastChat = now;
             const text = String(msg.text || '').slice(0, CHAT_MAX_LEN).trim();
             if (!text) return;
+            log(`chat: ${cons.key} <${v.username}> ${text}`);
             broadcastJson(cons, { t: 'chat', from: v.username, text, userId: v.userId });
             break;
         }
         case 'needkey': requestKeyframe(cons); break;
         case 'modevote': {
             const want = msg.mode === 'democracy' ? 'democracy' : 'anarchy';
+            log(`vote: ${v.username} proposes ${want} mode on "${cons.key}"`);
             openVote(cons, v, want);
             break;
         }
@@ -589,6 +637,7 @@ function castVote(cons, v, yes) {
     cons.vote.yes.delete(v.id);
     cons.vote.no.delete(v.id);
     (yes ? cons.vote.yes : cons.vote.no).add(v.id);
+    logV(`vote: ${v.username} voted ${yes ? 'yes' : 'no'} (${cons.vote.yes.size} yes / ${cons.vote.no.size} no) on "${cons.key}"`);
     broadcastJson(cons, voteSnapshot(cons));
     tallyVote(cons);
 }
@@ -602,11 +651,13 @@ function tallyVote(cons) {
     const decidedMode = vote.mode, by = vote.byName;
     cons.vote = null;
     cons.voteCooldownUntil = Date.now() + VOTE_COOLDOWN_MS;
+    log(`vote: "${cons.key}" ${passed ? 'PASSED' : 'FAILED'} ${decidedMode} mode (proposed by ${by})`);
     broadcastJson(cons, { t: 'vote', open: false, passed, mode: decidedMode, by });
     if (passed) {
         cons.mode = decidedMode;
         cons.democracyBucket = new Map();
         cons.lastDemocracyResult = new Set();
+        log(`mode: "${cons.key}" is now ${decidedMode}`);
         broadcastJson(cons, { t: 'mode', mode: decidedMode, by });
     }
 }
@@ -653,6 +704,7 @@ setInterval(() => {
             (merged.mouse.length ? merged.mouse.map((m) => `${m.x},${m.y},${m.button}`).join(';') : '');
         if (serialized !== cons.lastSentKeys || merged.mouse.some((m) => m.click)) {
             cons.lastSentKeys = serialized;
+            logV(`input: sending merged ${merged.keys.size} key(s) to host "${cons.key}"`);
             sendHost(cons, { t: 'input', keys: [...merged.keys], mouse: merged.mouse[merged.mouse.length - 1] || null });
             broadcastJson(cons, { t: 'held', keys: [...merged.keys] });
         }
@@ -665,12 +717,12 @@ setInterval(() => {
         if (!cons.hostAlive) { cons.lastVideoAt = Date.now(); continue; }
         const stalled = Date.now() - cons.lastVideoAt;
         if (stalled > 75000) {
-            console.error(`[${cons.key}] no video for ${(stalled / 1000) | 0}s — exiting for restart`);
+            error(`[${cons.key}] no video for ${(stalled / 1000) | 0}s — exiting for restart`);
             process.exit(1);
         }
         if (stalled > 20000 && Date.now() - cons.reloadSentAt > 75000) {
             cons.reloadSentAt = Date.now();
-            console.warn(`[${cons.key}] no video — reloading host page`);
+            warn(`[${cons.key}] no video — reloading host page`);
             sendHost(cons, { t: 'reload' });
         }
     }
@@ -687,7 +739,7 @@ setInterval(() => {
     for (const cons of consoles.values()) {
         const secs = (Date.now() - cons.stats.since) / 1000;
         if (secs > 30) {
-            console.log(`[${cons.key}] ${cons.viewers.size} viewers | ${(cons.stats.frames / secs).toFixed(1)} fps | ` +
+            log(`[${cons.key}] ${cons.viewers.size} viewer(s) | ${(cons.stats.frames / secs).toFixed(1)} fps | ` +
                 `${(cons.stats.bytes / secs / 1024).toFixed(0)} KiB/s | host=${cons.hostAlive}`);
             cons.stats = { frames: 0, bytes: 0, since: Date.now() };
         }
@@ -695,7 +747,8 @@ setInterval(() => {
 }, 30000);
 
 server.listen(PORT, process.env.EMULATOR_BIND || '0.0.0.0', () => {
-    console.log(`🕹 emulatorSHARE relay on 0.0.0.0:${PORT}`);
-    console.log(`   viewers: ws://…/stream?console=KEY   hosts: ws://…/host?token=…&console=KEY`);
-    console.log(`   db: ${DB_PATH}`);
+    log(`🕹 emulatorSHARE relay listening on ${process.env.EMULATOR_BIND || '0.0.0.0'}:${PORT}`);
+    log(`   viewers: ws://…/stream?console=KEY   hosts: ws://…/host?token=…&console=KEY`);
+    log(`   db: ${DB_PATH}   host token: ${HOST_TOKEN ? 'configured' : 'NOT SET (hosts refused)'}   log level: ${LOG_INFO}`);
+    log(`   (set EMULATOR_LOG=verbose|info|warn|error to control log detail)`);
 });
