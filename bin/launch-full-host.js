@@ -284,6 +284,19 @@ function startWm() {
     return wm;
 }
 
+// The default Xvfb root cursor is the bare "X" glyph. Point it at a real themed
+// pointer (Adwaita is shipped with most desktops) so the captured stream shows
+// a nice arrow instead. xsetroot -cursor_name resolves via XCURSOR_THEME/SIZE.
+function setNiceCursor() {
+    const fs = require('fs');
+    const icons = ['/usr/share/icons/Adwaita/cursors', '/usr/share/icons/hicolor/cursors'];
+    if (!icons.some((d) => fs.existsSync(d))) return;
+    const theme = '/usr/share/icons/Adwaita/cursors' === icons[0] ? 'Adwaita' : 'hicolor';
+    const env = childEnv({ XCURSOR_THEME: theme, XCURSOR_SIZE: '24' });
+    const trySet = (name) => spawnSync('xsetroot', ['-cursor_name', name], { env, stdio: 'ignore' });
+    trySet('left_ptr');   // normal arrow
+}
+
 // ── 4 + 5) ffmpeg capture → IVF (video) / Ogg (audio) ────────────────────────
 const KIND = { VCONF: 1, VKEY: 2, VDELTA: 3, ACONF: 4, ACHUNK: 5, SNAP: 6 };
 
@@ -740,6 +753,7 @@ async function main() {
     startWm();
     await new Promise((r) => setTimeout(r, 800));
     console.log('[full] window manager up');
+    setNiceCursor();
 
     connect();
     console.log('[full] running. Ctrl+C to stop.');
