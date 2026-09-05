@@ -92,6 +92,7 @@ const resX       = Number(arg('--resx', String(w), 'EMULATOR_RES_X'));
 const resY       = Number(arg('--resy', String(h), 'EMULATOR_RES_Y'));
 const videoCodec = arg('--video-codec', process.env.EMULATOR_VIDEO_CODEC || 'h264', 'EMULATOR_VIDEO_CODEC');
 const videoCapturePath = arg('--vcapture', '', 'EMULATOR_VCAPTURE');
+const keyFilter  = arg('--keys', process.env.EMULATOR_KEYS || 'all', 'EMULATOR_KEYS');
 
 function usage() {
     console.log(`
@@ -111,6 +112,9 @@ Options:
   --resx --resy              Virtual display resolution (default = --w x --h)
   --w --h --fps --bitrate    Pixel size / frame rate / bitrate of the stream
   --video-codec <h264|vp8>  Encoder for the video stream (default h264)
+  --keys      <all|none|list>  Which keys viewers may send: 'all', 'none', or a
+                               comma-separated allowlist (DOM codes KeyW/ArrowUp/
+                               Space or xdotool names w/Up/space; e.g. w,a,s,d,space)
   --display   <N>            Xvfb display number (default 99)
   --vcapture  <file>         Tee exact raw video bytes (IVF or Annex-B) to a file for offline repro
   --check                   Verify required binaries + games.json and exit
@@ -568,6 +572,41 @@ function takeSnapshot() {
 }
 
 // ── Input → xdotool ───────────────────────────────────────────────────────────
+// --keys <all|none|comma,list> restricts which keys viewers may send.
+//   all   - every key passes (default)
+//   none  - all keys blocked (mouse still works)
+//   list  - allow only these; accept DOM codes (KeyW, ArrowUp, Space, Digit5) or
+//           xdotool names (w, Up, space, 5), and single chars auto-expand to
+//           their DOM code so "w,a,s,d,space" just works.
+const DOM2XDOTOOL_SPACE = {
+    ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
+    up: 'Up', down: 'Down', left: 'Left', right: 'Right',
+    Space: 'space', space: 'space',
+    Enter: 'Return', enter: 'Return', Return: 'Return',
+    Escape: 'Escape', esc: 'Escape',
+    Tab: 'Tab', tab: 'Tab', Backspace: 'BackSpace', backspace: 'BackSpace',
+    ShiftLeft: 'Shift_L', shift: 'Shift_L', ControlLeft: 'Control_L', ctrl: 'Control_L',
+    AltLeft: 'Alt_L', alt: 'Alt_L', MetaLeft: 'Super_L', super: 'Super_L',
+};
+function buildKeyAllowlist(spec) {
+    if (spec === 'all' || spec === undefined || spec === null) return null;   // null = allow all
+    if (spec === 'none') return new Set();                                     // empty = block all
+    const allow = new Set();
+    const add = (k) => { if (k) allow.add(k); };
+    for (let raw of String(spec).split(',')) {
+        raw = raw.trim();
+        if (!raw) continue;                                                  // skip empties
+        add(raw);                                                            // e.g. w / Up / KeyW / ArrowUp
+        add(DOM2XDOTOOL_SPACE[raw]);                                         // alias → canonical xdotool name
+        if (raw.length === 1) {
+            if (/[a-z]/i.test(raw)) add('Key' + raw.toUpperCase());          // w → KeyW
+            else if (/[0-9]/.test(raw)) add('Digit' + raw);                  // 5 → Digit5
+        }
+    }
+    return allow;
+}
+const allowedKeys = buildKeyAllowlist(keyFilter);
+
 const DOM2XDOTOOL = {
     ArrowUp: 'Up', ArrowDown: 'Down', ArrowLeft: 'Left', ArrowRight: 'Right',
     Space: 'space', Enter: 'Return', Escape: 'Escape', Tab: 'Tab', Backspace: 'BackSpace',
@@ -602,12 +641,27 @@ function fireXdotool(args, delayMs) {
 
 const heldKeys = new Set();
 function applyInput(keys, mouse) {
-    const desired = new Set((keys || []).map((k) => domToXdotool(k)).filter(Boolean));
-    for (const k of [...heldKeys]) {
-        if (!desired.has(k)) { fireXdotool(['keyup', k]); heldKeys.delete(k); }
+    const desired = new Set();
+    if (allowedKeys) {
+        // Filtered mode: only forward keys in the allowlist; release anything
+        // currently held that the allowlist doesn't permit.
+        for (const k of (keys || [])) {
+            const t = domToXdotool(k);
+            if (t && (allowedKeys.has(k) || allowedKeys.has(t))) desired.add(t);
+        }
+        for (const k of [...heldKeys]) {
+            if (!desired.has(k)) { fireXdotool(['keyup', k]); heldKeys.delete(k); }
+        }
+    } else {
+        // 'all' mode — forward everything (original behavior).
+        const d = new Set((keys || []).map((k) => domToXdotool(k)).filter(Boolean));
+        for (const k of [...heldKeys]) {
+            if (!d.has(k)) { fireXdotool(['keyup', k]); heldKeys.delete(k); }
+        }
+        for (const t of d) if (!heldKeys.has(t)) { fireXdotool(['keydown', t]); heldKeys.add(t); }
     }
-    for (const k of [...desired]) {
-        if (!heldKeys.has(k)) { fireXdotool(['keydown', k]); heldKeys.add(k); }
+    for (const t of [...desired]) {
+        if (!heldKeys.has(t)) { fireXdotool(['keydown', t]); heldKeys.add(t); }
     }
     if (mouse) {
         // Viewer coords are in stream pixel space (0..w, 0..h). If the virtual
