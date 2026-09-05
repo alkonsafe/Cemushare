@@ -295,6 +295,7 @@ function frame(kind, time, payload) {
     return out;
 }
 function sendMedia(kind, time, payload) {
+    if (!payload.length) return;   // decoder chokes on empty buffers
     if (!wsReady || !ws || (ws.bufferedAmount || 0) > 4 * 1024 * 1024) return;
     try { ws.send(frame(kind, time, payload)); } catch {}
 }
@@ -315,8 +316,9 @@ function parseIvf(chunk) {
             if (buf.length - off - 12 < size) break;
             const payload = buf.slice(off + 12, off + 12 + size);
             off += 12 + size;
+            if (!payload.length) continue;   // libvpx realtime can emit 0-byte packets
             // VP8 first byte: bit 0 = 0 → keyframe. IVF has no keyframe flag.
-            const isKey = (payload.length > 0 && (payload[0] & 1) === 0);
+            const isKey = (payload[0] & 1) === 0;
             sendMedia(isKey ? KIND.VKEY : KIND.VDELTA, ts(), payload);
         }
         parseIvf.buf = buf.slice(off);

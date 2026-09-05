@@ -912,6 +912,7 @@ function requestKeyframe() {
 
 function decodeVideo(kind, timestamp, payload) {
     if (!videoDecoder || videoDecoder.state !== 'configured') return;
+    if (!payload || payload.length === 0) return;   // decoder throws on empty buffers
     const isKey = kind === KIND.VKEY;
     const q = videoDecoder.decodeQueueSize;
     // Back-pressure: keep decode latency bounded by dropping frames when the
@@ -1192,6 +1193,7 @@ async function configureAudio(config) {
 
 function decodeAudio(timestamp, payload) {
     if (!audioDecoder || audioDecoder.state !== 'configured') return;
+    if (!payload || payload.length === 0) return;   // decoder throws on empty buffers
     try { audioDecoder.decode(new EncodedAudioChunk({ type: 'key', timestamp, data: payload })); } catch {}
 }
 

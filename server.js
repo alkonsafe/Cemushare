@@ -478,7 +478,7 @@ function attachHost(ws, consoleParam) {
                 handleShot(cons, data.subarray(9));
                 return;
             }
-            if (kind === KIND.VKEY) { cons.lastKeyframe = Buffer.from(data); cons.stats.frames++; cons.lastVideoAt = now; }
+            if (kind === KIND.VKEY && data.length > 9) { cons.lastKeyframe = Buffer.from(data); cons.stats.frames++; cons.lastVideoAt = now; }
             else if (kind === KIND.VDELTA) { cons.stats.frames++; cons.lastVideoAt = now; }
             cons.stats.bytes += data.length;
             if (!sawFirstFrame && cons.hostAlive) {
