@@ -731,6 +731,11 @@ function handleViewerMsg(cons, v, msg) {
             v.keys = next;
             v.keysAt = Date.now();
             if (next.size) logV(`input: ${v.username} keys=[${[...next].join(',')}] console=${cons.key}`);
+            // Low-latency path: a viewer changed its keys, so forward the merge to
+            // the host on this tick-of-event-loop instead of waiting for the next
+            // 30Hz poll. The merge functions dedupe identical states, so this is
+            // cheap even under rapid key spam.
+            if (cons.mode !== 'democracy') flushConsoleInput(cons, Date.now());
             break;
         }
         case 'chat': {
@@ -921,24 +926,29 @@ function mergeDemocracy(cons, active) {
     return { keys: out, mouse: [] };
 }
 
+function flushConsoleInput(cons, now) {
+    const active = [];
+    for (const v of cons.viewers.values()) {
+        if (now - v.keysAt > INPUT_STALE_MS) v.keys = new Set();
+        active.push(v);
+    }
+    const merged = cons.mode === 'democracy' ? mergeDemocracy(cons, active) : mergeAnarchy(cons, active);
+    const serialized = [...merged.keys].sort().join(',') + '|' +
+        (merged.mouse.length ? merged.mouse.map((m) => `${m.x},${m.y},${m.button}`).join(';') : '');
+    if (serialized !== cons.lastSentKeys || merged.mouse.some((m) => m.click)) {
+        cons.lastSentKeys = serialized;
+        logV(`input: sending merged ${merged.keys.size} key(s) to host "${cons.key}"`);
+        sendHost(cons, { t: 'input', keys: [...merged.keys], mouse: merged.mouse[merged.mouse.length - 1] || null });
+        broadcastJson(cons, { t: 'held', keys: [...merged.keys] });
+    }
+}
+// Forward input to the host immediately on arrival, so keystrokes don't queue
+// up to a full 30Hz tick (~33ms) of extra latency. The tick below remains as a
+// safety net: stale-key expiry, democracy settle windows, and recovery if a
+// console wakes with no input message in flight.
 setInterval(() => {
     const now = Date.now();
-    for (const cons of consoles.values()) {
-        const active = [];
-        for (const v of cons.viewers.values()) {
-            if (now - v.keysAt > INPUT_STALE_MS) v.keys = new Set();
-            active.push(v);
-        }
-        const merged = cons.mode === 'democracy' ? mergeDemocracy(cons, active) : mergeAnarchy(cons, active);
-        const serialized = [...merged.keys].sort().join(',') + '|' +
-            (merged.mouse.length ? merged.mouse.map((m) => `${m.x},${m.y},${m.button}`).join(';') : '');
-        if (serialized !== cons.lastSentKeys || merged.mouse.some((m) => m.click)) {
-            cons.lastSentKeys = serialized;
-            logV(`input: sending merged ${merged.keys.size} key(s) to host "${cons.key}"`);
-            sendHost(cons, { t: 'input', keys: [...merged.keys], mouse: merged.mouse[merged.mouse.length - 1] || null });
-            broadcastJson(cons, { t: 'held', keys: [...merged.keys] });
-        }
-    }
+    for (const cons of consoles.values()) flushConsoleInput(cons, now);
 }, Math.round(1000 / TICK_HZ));
 
 // ── Watchdog (per console) + keyframe + stats ───────────────────────────────
