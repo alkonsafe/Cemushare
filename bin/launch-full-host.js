@@ -353,9 +353,8 @@ function parseIvf(chunk) {
         parseIvf.buf = buf.slice(off);
     }
 }
-function handleVideoChunk(d) { parseIvf(d); }
 
-// -- Ogg reader (audio) --------------------------------------------------------
+// -- Ogg reader --------------------------------------------------------
 function parseOgg(chunk) {
     parseOgg.buf = Buffer.concat([parseOgg.buf || Buffer.alloc(0), chunk]);
     const buf = parseOgg.buf;
@@ -534,13 +533,6 @@ function restartVideo() {
     }
     log('forced fresh keyframe — restarting video encoder');
     spawnVideo();
-}
-function stopCaptures() {
-    if (videoProc) { try { videoProc.stdout.removeAllListeners('data'); } catch {} tryKill(videoProc, 'SIGKILL'); videoProc = null; }
-    if (audioProc) { try { audioProc.stdout.removeAllListeners('data'); } catch {} tryKill(audioProc, 'SIGKILL'); audioProc = null; }
-    parseIvf.buf = null; parseIvf.header = null;
-    if (videoSplitter) { videoSplitter.reset(); }
-    parseOgg.buf = null; parseOgg.carry = null; parseOgg.page = 0; skipPackets = 2;
 }
 function stopCaptures() {
     if (videoProc) { try { videoProc.stdout.removeAllListeners('data'); } catch {} tryKill(videoProc, 'SIGKILL'); videoProc = null; }
