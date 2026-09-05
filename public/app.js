@@ -460,7 +460,7 @@ const TUTORIALS = {
         { title: 'Be cool', body: 'Please check and follow the rules at the top of the page: no harassment, no NSFW content, no toxicity, no breaking anything. Just pick a console and have fun.' },
     ],
     console: [
-        { title: 'You\'re in!', body: 'This is the console\'s live screen, streaming in real time from the host machine. What you see is happening right now.' },
+        { title: 'You\'re in!', body: 'This is the console\'s live screen, streaming in real time from the host machine.' },
         { title: 'Everyone shares the controls', body: 'Your keyboard and mouse feed into the same controller as everyone else.' },
         { title: 'Talk and coordinate', body: 'Use the chat to organize with other players and check the player list to see who\'s in the room. Now jump in!' },
     ],
