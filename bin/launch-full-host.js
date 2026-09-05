@@ -180,7 +180,17 @@ function makeRuntimeDir() {
 }
 
 const displayStr = `:${display}`;
-const childEnv = (extra) => ({ ...process.env, DISPLAY: displayStr, ...(extra || {}) });
+let RUNTIME_DIR = null;   // set in main(); children need it to reach OUR pulse server
+function childEnv(extra) {
+    const env = { ...process.env, DISPLAY: displayStr };
+    if (RUNTIME_DIR) {
+        // Points every child (ffmpeg, games) at the pulse server we started,
+        // not whatever default audio server happens to be running on the box.
+        env.XDG_RUNTIME_DIR = RUNTIME_DIR;
+        env.PULSE_SERVER = `unix:${path.join(RUNTIME_DIR, 'pulse/native')}`;
+    }
+    return Object.assign(env, extra || {});
+}
 
 // ── Process plumbing ──────────────────────────────────────────────────────────
 const children = [];
@@ -583,6 +593,7 @@ async function main() {
     console.log(`[full] stream      : ${w}x${h}@${fps}, ${(bitrate / 1000) | 0} kbps video + 128k opus`);
 
     const rt = makeRuntimeDir();
+    RUNTIME_DIR = rt;
     startXvfb(rt);
     await waitForDisplay().catch((err) => { console.error(`ERROR: ${err.message}`); process.exit(1); });
     console.log(`[full] virtual display ${displayStr} is up`);
