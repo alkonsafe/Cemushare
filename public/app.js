@@ -469,6 +469,10 @@ const TUTORIALS = {
 let activeTutorial = null;
 let tutorialIndex = 0;
 
+function brandHTML(text) {
+    return text.replace(/emulatorSHARE/g, '<span class="text-[#1E88E5]">emulator</span><span class="text-[#FF6B35]">SHARE</span>');
+}
+
 function tutorialSeenKey(id) {
     return `tutorial.seen.${id}.${getCurrentUsername() || 'guest'}`;
 }
@@ -499,10 +503,8 @@ function renderTutorialStep() {
     const steps = TUTORIALS[activeTutorial];
     if (!steps) return;
     const step = steps[tutorialIndex];
-    document.getElementById('tutorialTitle').textContent = step.title;
-    document.getElementById('tutorialBody').textContent = step.body;
-    document.getElementById('tutorialDots').innerHTML = steps.map((_, i) =>
-        `<span class="w-2 h-2 rounded-full ${i === tutorialIndex ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}"></span>`).join('');
+    document.getElementById('tutorialTitle').innerHTML = brandHTML(step.title);
+    document.getElementById('tutorialBody').innerHTML = '<p class="text-gray-700 dark:text-gray-300 text-sm">' + brandHTML(step.body) + '</p>';
     document.getElementById('tutorialPrevBtn').classList.toggle('hidden', tutorialIndex === 0);
     document.getElementById('tutorialNextBtn').textContent =
         tutorialIndex === steps.length - 1 ? 'Done' : 'Next';
