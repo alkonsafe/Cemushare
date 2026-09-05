@@ -187,6 +187,7 @@ async function fetchConsoles(page = 1, append = false) {
 
         const consoles = Array.isArray(data.consoles) ? data.consoles : Object.values(data.consoles || {})
         renderConsoles(consoles)
+        if (!append) maybeShowHomeTutorial()
     } catch(err) {
         console.error('Consoles fetch error:', err)
         document.getElementById('projectsLoader')?.remove()
@@ -452,6 +453,79 @@ function openRulesModal() {
     document.getElementById('rulesModal').classList.remove('hidden')
 }
 
+// ── Tutorials (one-time, per user) ───────────────────────────────────────────
+const TUTORIALS = {
+    home: [
+        { title: 'Welcome to emulatorSHARE', body: 'Every card on this screen is a real console running on a friend\u2019s machine, streamed live into your browser. No downloads, no ROMs — just click a console and play.' },
+        { title: 'Pick a console', body: 'Click any card to open it. The picture on each card is the console\u2019s current screen — a fresh snapshot taken every 5 minutes while it\u2019s online.' },
+        { title: 'Play together', body: 'Everyone in a console shares the same controller. Inputs are either merged (anarchy mode) or majority-voted (democracy mode), and the chat lets you coordinate with the crowd.' },
+        { title: 'What stays on the grid', body: 'A console is removed automatically after it\u2019s been offline for more than 2 minutes, so you only ever see machines you can actually join.' },
+        { title: 'Don\u2019t be a jerk', body: 'Read the Rules button up top: no harassment, no NSFW, don\u2019t delete save files. Pick a console and have fun!' },
+    ],
+    console: [
+        { title: 'You\u2019re in!', body: 'This is the console\u2019s live screen — what you see is happening right now on the host machine and streaming to you in real time.' },
+        { title: 'Everyone shares the controls', body: 'Your keyboard and mouse are wired straight into the same controller everyone else uses. In anarchy mode every input counts; in democracy only the crowd\u2019s majority keys get through.' },
+        { title: 'Talk and play', body: 'Use chat to coordinate with the other players, and watch the player list to see who\u2019s in the room. That\u2019s everything — jump in!' },
+    ],
+};
+
+let activeTutorial = null;
+let tutorialIndex = 0;
+
+function tutorialSeenKey(id) {
+    return `tutorial.seen.${id}.${getCurrentUsername() || 'guest'}`;
+}
+function tutorialAlreadySeen(id) {
+    try { return localStorage.getItem(tutorialSeenKey(id)) === '1'; } catch { return false; }
+}
+function markTutorialSeen(id) {
+    try { localStorage.setItem(tutorialSeenKey(id), '1'); } catch {}
+}
+
+function showTutorial(id) {
+    const steps = TUTORIALS[id];
+    if (!steps || !steps.length) return;
+    activeTutorial = id;
+    tutorialIndex = 0;
+    renderTutorialStep();
+    document.getElementById('tutorialModal').classList.remove('hidden');
+}
+
+function maybeShowHomeTutorial() {
+    if (!tutorialAlreadySeen('home')) showTutorial('home');
+}
+function maybeShowConsoleTutorial() {
+    if (!tutorialAlreadySeen('console')) showTutorial('console');
+}
+
+function renderTutorialStep() {
+    const steps = TUTORIALS[activeTutorial];
+    if (!steps) return;
+    const step = steps[tutorialIndex];
+    document.getElementById('tutorialTitle').textContent = step.title;
+    document.getElementById('tutorialBody').textContent = step.body;
+    document.getElementById('tutorialDots').innerHTML = steps.map((_, i) =>
+        `<span class="w-2 h-2 rounded-full ${i === tutorialIndex ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}"></span>`).join('');
+    document.getElementById('tutorialPrevBtn').classList.toggle('hidden', tutorialIndex === 0);
+    document.getElementById('tutorialNextBtn').textContent =
+        tutorialIndex === steps.length - 1 ? 'Done' : 'Next';
+}
+
+function tutorialNext() {
+    const steps = TUTORIALS[activeTutorial];
+    if (!steps) return;
+    if (tutorialIndex < steps.length - 1) { tutorialIndex++; renderTutorialStep(); }
+    else tutorialClose();
+}
+function tutorialPrev() {
+    if (tutorialIndex > 0) { tutorialIndex--; renderTutorialStep(); }
+}
+function tutorialClose() {
+    if (activeTutorial) markTutorialSeen(activeTutorial);
+    document.getElementById('tutorialModal').classList.add('hidden');
+    activeTutorial = null;
+}
+
 // stuff
 let currentConsoleName = null
 
@@ -463,6 +537,7 @@ async function openConsoleViewer(consoleName) {
     
     connectStreamWs(consoleName)
     setupChatForm()
+    maybeShowConsoleTutorial()
 }
 
 function closeConsoleViewer() {
