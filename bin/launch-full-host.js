@@ -374,8 +374,7 @@ function onOggPacket(p, granule) {
 function handleAudioChunk(d) { parseOgg(d); }
 
 // ── ffmpeg capture processes ─────────────────────────────────────────────────
-function startCaptures() {
-    stopCaptures();
+function spawnVideo() {
     const videoArgs = [
         '-hide_banner', '-loglevel', 'error',
         '-f', 'x11grab', '-video_size', `${w}x${h}`, '-framerate', String(fps), '-i', displayStr,
@@ -383,25 +382,56 @@ function startCaptures() {
         '-b:v', String(bitrate), '-g', String(fps), '-keyint_min', String(fps), '-row-mt', '1',
         '-f', 'ivf', 'pipe:1',
     ];
+    videoProc = track(spawn('ffmpeg', videoArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
+    videoProc.on('error', onSpawnError('video ffmpeg'));
+    videoProc.stdout.on('data', handleVideoChunk);
+    videoProc.stderr.on('data', (d) => process.stderr.write('[video ffmpeg] ' + d));
+    videoProc.on('exit', (code) => { if (wsReady) console.log(`[full] video ffmpeg exited (${code})`); });
+    console.log(`[full] video capture up (pid=${videoProc.pid}, ${w}x${h}@${fps} → libvpx/vp8 → IVF)`);
+}
+function spawnAudio() {
     const audioArgs = [
         '-hide_banner', '-loglevel', 'error',
         '-f', 'pulse', '-i', `${sinkName}.monitor`,
         '-ac', '2', '-ar', '48000', '-c:a', 'libopus', '-b:a', '128k', '-frame_duration', '20',
         '-f', 'ogg', 'pipe:1',
     ];
-    console.log(`[full] starting video capture: Xvfb ${w}x${h}@${fps} → libvpx/vp8 → IVF`);
-    videoProc = track(spawn('ffmpeg', videoArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
-    videoProc.on('error', onSpawnError('video ffmpeg'));
-    videoProc.stdout.on('data', handleVideoChunk);
-    videoProc.stderr.on('data', (d) => process.stderr.write('[video ffmpeg] ' + d));
-    videoProc.on('exit', (code) => { if (wsReady) console.log(`[full] video ffmpeg exited (${code})`); });
-
     audioProc = track(spawn('ffmpeg', audioArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
     audioProc.on('error', onSpawnError('audio ffmpeg'));
     audioProc.stdout.on('data', handleAudioChunk);
     audioProc.stderr.on('data', (d) => process.stderr.write('[audio ffmpeg] ' + d));
     audioProc.on('exit', (code) => { if (wsReady) console.log(`[full] audio ffmpeg exited (${code})`); });
-    console.log(`[full] capture spawned (video pid=${videoProc.pid}, audio pid=${audioProc.pid})`);
+    console.log(`[full] audio capture up (pid=${audioProc.pid}, fullsink.monitor → libopus → ogg)`);
+}
+function startCaptures() {
+    stopCaptures();
+    spawnVideo();
+    spawnAudio();
+}
+// A fresh ffmpeg instance always opens with a brand-new keyframe, so restarting
+// the video encoder is the dirt-simple way to honor the relay's `keyframe`
+// request (new viewers / decode resyncs) even though `-g fps` already yields a
+// natural intra frame every second.
+let lastKeyframeRestartAt = 0;
+const KEYFRAME_RESTART_MS = 3000;
+function restartVideo() {
+    const now = Date.now();
+    if (now - lastKeyframeRestartAt < KEYFRAME_RESTART_MS) return;   // natural -g GOPs cover the rest
+    lastKeyframeRestartAt = now;
+    if (videoProc) {
+        try { videoProc.stdout.removeAllListeners('data'); } catch {}
+        tryKill(videoProc, 'SIGKILL');
+        videoProc = null;
+        parseIvf.buf = null; parseIvf.header = null;
+    }
+    log('forced fresh keyframe — restarting video encoder');
+    spawnVideo();
+}
+function stopCaptures() {
+    if (videoProc) { try { videoProc.stdout.removeAllListeners('data'); } catch {} tryKill(videoProc, 'SIGKILL'); videoProc = null; }
+    if (audioProc) { try { audioProc.stdout.removeAllListeners('data'); } catch {} tryKill(audioProc, 'SIGKILL'); audioProc = null; }
+    parseIvf.buf = null; parseIvf.header = null;
+    parseOgg.buf = null; parseOgg.carry = null; parseOgg.page = 0; skipPackets = 2;
 }
 function stopCaptures() {
     if (videoProc) { try { videoProc.stdout.removeAllListeners('data'); } catch {} tryKill(videoProc, 'SIGKILL'); videoProc = null; }
@@ -557,7 +587,7 @@ function connect() {
         let msg; try { msg = JSON.parse(ev.data); } catch { return; }
         switch (msg.t) {
             case 'input': applyInput(msg.keys, msg.mouse); break;
-            case 'keyframe': break;                          // periodic IVF keyframes suffice
+            case 'keyframe': restartVideo(); break;
             case 'snapshot': takeSnapshot(); break;
             case 'reload': log('relay asked for a reload — restarting capture'); startCaptures(); break;
             case 'launch': launchGame(msg.game); break;

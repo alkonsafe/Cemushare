@@ -864,6 +864,9 @@ async function configureVideo(config) {
         if (decoderConfig) {
             try { videoDecoder.configure(decoderConfig); } catch {}
         }
+        // Ask the host to emit a fresh keyframe NOW so we resync immediately
+        // instead of freezing until the next natural GOP boundary.
+        requestKeyframe();
     };
 
     videoDecoder = new VideoDecoder({ output: __decoderOutputFn, error: __decoderErrorFn });
@@ -935,7 +938,12 @@ function decodeVideo(kind, timestamp, payload) {
         return;
     }
     if (q > 4 && !isKey) {
-        // Moderate load - skip deltas to keep latency low.
+        // High latency. We must NOT skip JUST this delta: in VP8 every delta
+        // references the previously decoded frame, so dropping one breaks the
+        // reference chain and the next delta fails with a decode error. Instead
+        // drop everything until the next keyframe and ask the host for one, so
+        // the chain is rebuilt cleanly on an intra frame.
+        waitingForKeyframe = true;
         requestKeyframe();
         return;
     }
