@@ -1304,6 +1304,11 @@ function flushInput(msg) {
 // Global keyboard forwarding - track a held-key set so releases actually reach
 // the server (a single [code] on keydown with no keyup would leave buttons
 // stuck down forever and pin the game for everyone).
+//
+// KEYMAP remaps a few convenience aliases (WASD -> arrows, K -> X, J -> C,
+// Shift -> Space). Unlike the old behavior it is NOT a whitelist: any key not
+// in KEYMAP is forwarded with its raw e.code, so the full keyboard reaches the
+// host, which can filter with its own --keys allowlist.
 const heldInputKeys = new Set();
 const KEYMAP = {
     ArrowUp: 'ArrowUp', KeyW: 'ArrowUp',
@@ -1315,8 +1320,14 @@ const KEYMAP = {
     Space: 'Space', ShiftLeft: 'Space',
     Enter: 'Enter',
 };
+// Keys that are pure modifiers / browser-reserved and must never reach the host.
+const NON_FORWARDABLE = new Set([
+    'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight',
+    'MetaLeft', 'MetaRight', 'CapsLock', 'NumLock', 'ScrollLock',
+    'F1', 'F3', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
+]);
 function setInputKey(code, down) {
-    const mapped = KEYMAP[code];
+    const mapped = KEYMAP[code] || code;
     if (!mapped) return;
     const had = heldInputKeys.has(mapped);
     if (down) heldInputKeys.add(mapped); else heldInputKeys.delete(mapped);
@@ -1326,14 +1337,16 @@ function setInputKey(code, down) {
 window.addEventListener('keydown', (e) => {
     if (!currentConsoleName) return;
     if (isTypingField(e.target)) return;
-    if (!KEYMAP[e.code]) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;   // browser/OS combos stay local
+    if (NON_FORWARDABLE.has(e.code)) return;
     e.preventDefault();
     if (!e.repeat) setInputKey(e.code, true);
 });
 window.addEventListener('keyup', (e) => {
     if (!currentConsoleName) return;
     if (isTypingField(e.target)) return;
-    if (!KEYMAP[e.code]) return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (NON_FORWARDABLE.has(e.code)) return;
     e.preventDefault();
     setInputKey(e.code, false);
 });

@@ -627,6 +627,20 @@ function domToXdotool(code) {
     const np = /^Numpad([0-9])$/.exec(code);    if (np) return 'KP_' + np[1];
     return code.replace(/^Key/, '').replace(/^Digit/, '');
 }
+function domKeyToXdotool(code) {
+    // The viewer forwards raw e.code (it no longer whitelists). Expand DOM
+    // codes that have distinct xdotool keysyms so punctuation reaches the
+    // emulator correctly instead of being passed as an unknown token.
+    const punct = {
+        Minus: 'minus', Equal: 'equal', BracketLeft: 'bracketleft',
+        BracketRight: 'bracketright', Backslash: 'backslash', Semicolon: 'semicolon',
+        Quote: 'apostrophe', Backquote: 'backquote', Comma: 'comma', Period: 'period',
+        Slash: 'slash', IntlBackslash: 'backslash', IntlRo: 'henkan',
+        AltGraph: 'ISO_Level3_Shift',
+    };
+    if (punct[code]) return punct[code];
+    return domToXdotool(code);
+}
 function xd(args) { try { spawnSync('xdotool', args, { env: childEnv(), stdio: 'ignore' }); } catch {} }
 
 // Fire-and-forget xdotool call: never let a failed spawn take the host down.
@@ -646,7 +660,7 @@ function applyInput(keys, mouse) {
         // Filtered mode: only forward keys in the allowlist; release anything
         // currently held that the allowlist doesn't permit.
         for (const k of (keys || [])) {
-            const t = domToXdotool(k);
+            const t = domKeyToXdotool(k);
             if (t && (allowedKeys.has(k) || allowedKeys.has(t))) desired.add(t);
         }
         for (const k of [...heldKeys]) {
@@ -654,7 +668,7 @@ function applyInput(keys, mouse) {
         }
     } else {
         // 'all' mode — forward everything (original behavior).
-        const d = new Set((keys || []).map((k) => domToXdotool(k)).filter(Boolean));
+        const d = new Set((keys || []).map((k) => domKeyToXdotool(k)).filter(Boolean));
         for (const k of [...heldKeys]) {
             if (!d.has(k)) { fireXdotool(['keyup', k]); heldKeys.delete(k); }
         }
