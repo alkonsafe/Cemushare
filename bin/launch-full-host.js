@@ -32,6 +32,19 @@ const WebSocket = require('ws');
 
 const ROOT = path.resolve(__dirname, '..');
 
+// A silent death right after spawn is the worst kind to debug — make every
+// crash loud: log the stack, then exit(1) so the shell/npm reports a failure.
+process.on('uncaughtException', (err) => {
+    console.error('[full] FATAL uncaught exception:', err);
+    console.error(err.stack);
+    process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('[full] FATAL unhandled rejection:', reason);
+    if (reason && reason.stack) console.error(reason.stack);
+    process.exit(1);
+});
+
 // ── .env autoload (same as launch-host.js) ─────────────────────────────────
 (function loadDotEnv() {
     const file = path.join(ROOT, '.env');
@@ -116,6 +129,18 @@ function checkTools() {
     if (missing.length) {
         console.error('ERROR: missing required tools for full-host: ' + missing.join(', '));
         console.error('  Install with: sudo apt install xvfb xfwm4 pulseaudio ffmpeg xdotool');
+        return false;
+    }
+    // The ffmpeg build must actually ship the encoders we rely on — if they are
+    // missing both capture processes exit instantly (which looks like the host
+    // "just closes" right after "starting video capture").
+    const enc = spawnSync('ffmpeg', ['-hide_banner', '-encoders'], { stdio: ['ignore', 'pipe', 'ignore'] }).stdout.toString();
+    const missingEnc = [];
+    if (!enc.includes('libvpx')) missingEnc.push('libvpx (VP8 video)');
+    if (!enc.includes('libopus')) missingEnc.push('libopus (Opus audio)');
+    if (missingEnc.length) {
+        console.error('ERROR: this ffmpeg build is missing encoders: ' + missingEnc.join(', '));
+        console.error('  Install ffmpeg with libvpx + libopus (e.g. sudo apt install ffmpeg builds with both).');
         return false;
     }
     return true;
@@ -232,6 +257,8 @@ function setupNullSink(rt) {
     spawnSync('pactl', ['load-module', 'module-null-sink', `sink_name=${sinkName}`, 'sink_properties=device.description=FullHostSink'],
         { env: pulseEnv, stdio: 'ignore' });
     spawnSync('pactl', ['set-default-sink', sinkName], { env: pulseEnv, stdio: 'ignore' });
+    const src = spawnSync('pactl', ['list', 'short', 'sources'], { env: pulseEnv, stdio: ['ignore', 'pipe', 'ignore'] });
+    log('pulse sources:\n' + src.stdout.toString().trim() || '(none)');
 }
 
 // ── 3) Start xfwm4 (window manager) ──────────────────────────────────────────
@@ -354,14 +381,15 @@ function startCaptures() {
     videoProc = track(spawn('ffmpeg', videoArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'ignore'] }));
     videoProc.on('error', onSpawnError('video ffmpeg'));
     videoProc.stdout.on('data', handleVideoChunk);
-    videoProc.stderr.on('data', (d) => process.stderr.write(d));
+    videoProc.stderr.on('data', (d) => process.stderr.write('[video ffmpeg] ' + d));
     videoProc.on('exit', (code) => { if (wsReady) console.log(`[full] video ffmpeg exited (${code})`); });
 
     audioProc = track(spawn('ffmpeg', audioArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'ignore'] }));
     audioProc.on('error', onSpawnError('audio ffmpeg'));
     audioProc.stdout.on('data', handleAudioChunk);
-    audioProc.stderr.on('data', (d) => process.stderr.write(d));
+    audioProc.stderr.on('data', (d) => process.stderr.write('[audio ffmpeg] ' + d));
     audioProc.on('exit', (code) => { if (wsReady) console.log(`[full] audio ffmpeg exited (${code})`); });
+    console.log(`[full] capture spawned (video pid=${videoProc.pid}, audio pid=${audioProc.pid})`);
 }
 function stopCaptures() {
     if (videoProc) { try { videoProc.stdout.removeAllListeners('data'); } catch {} tryKill(videoProc, 'SIGKILL'); videoProc = null; }
