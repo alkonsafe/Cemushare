@@ -877,9 +877,10 @@ async function configureVideo(config) {
     videoDecoder = new VideoDecoder({ output: __decoderOutputFn, error: __decoderErrorFn });
     videoDecoder.configure(decoderConfig);
     waitingForKeyframe = true;
-    // Only avc1/H.264 needs a hand-built avcC description if the host sent none
-    // (Edge omits it). VP8/VP9 decode with inline keyframes, no description.
-    needAvcDescription = !decoderConfig.description && /^avc/.test(decoderConfig.codec);
+    // No description-harvesting: when the host sends no avcC description we decode
+    // raw Annex-B byte-stream (SPS/PPS inline with each IDR), same as the
+    // arena/desktop agent. Request a keyframe so we start on a clean IDR.
+    needAvcDescription = false;
     if (streamWs && streamWs.readyState === 1) streamWs.send(JSON.stringify({ t: 'needkey' }));
 }
 
@@ -976,10 +977,17 @@ function decodeVideo(kind, timestamp, payload) {
     try {
         let data;
         if (decoderConfig && decoderConfig.codec && /^avc/.test(decoderConfig.codec)) {
-            // H.264: convert annex-B to avcC (4-byte length prefixes). When the
-            // decoder has an avcC description, drop redundant inline SPS/PPS/SEI.
-            const clean = isKey && decoderConfig.description ? stripParamSets(payload) : payload;
-            data = annexBToAvcC(clean || payload);
+            // H.264. When the host supplied an avcC `description` we convert the
+            // Annex-B AU to length-prefixed avcC and drop the redundant inline
+            // SPS/PPS/SEI. When it did not (like the arena/desktop host), feed
+            // the raw Annex-B byte-stream — Chrome reads SPS/PPS directly out of
+            // each IDR and needs no description or conversion.
+            if (decoderConfig.description) {
+                const clean = isKey ? stripParamSets(payload) : payload;
+                data = annexBToAvcC(clean || payload);
+            } else {
+                data = payload;
+            }
         } else {
             // VP8/VP9/AV1: feed the raw chunk; no annex-B conversion or description.
             data = payload;
@@ -1113,9 +1121,10 @@ function annexBNals(payload) {
 function buildAvcDescription(sps, pps) {
     const out = [];
     const u16 = (v) => { out.push(v >> 8 & 0xff, v & 0xff); };
-    // profile/compat/level copied from the SPS so Edge's strict validation of
-    // the description against the SPS doesn't reject it.
-    out.push(0x01, sps[0] || 0, sps[1] || 0, sps[2] || 0);  // version, profile, compat, level
+    // sps[0] is the NAL-type header byte (0x67); the profile/compat/level live
+    // at sps[1..3] in that order, so copy those — a shifted description (profile
+    // byte = 0x67) is rejected by strict decoders.
+    out.push(0x01, sps[1] || 0, sps[2] || 0, sps[3] || 0);  // version, profile, compat, level
     out.push(0xfc | 0x03);              // lengthSizeMinusOne = 3 (4-byte lengths)
     out.push(0xe0 | 1);                 // 1 SPS
     u16(sps.length); for (const b of sps) out.push(b);

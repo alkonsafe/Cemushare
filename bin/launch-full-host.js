@@ -90,6 +90,7 @@ const bitrate    = Number(arg('--bitrate', process.env.EMULATOR_BITRATE || '1800
 const display    = Number(arg('--display', '99', 'EMULATOR_DISPLAY'));
 const resX       = Number(arg('--resx', String(w), 'EMULATOR_RES_X'));
 const resY       = Number(arg('--resy', String(h), 'EMULATOR_RES_Y'));
+const videoCodec = arg('--video-codec', process.env.EMULATOR_VIDEO_CODEC || 'h264', 'EMULATOR_VIDEO_CODEC');
 const videoCapturePath = arg('--vcapture', '', 'EMULATOR_VCAPTURE');
 
 function usage() {
@@ -109,8 +110,9 @@ Options:
   --games     <path>          games.json describing the games viewers can launch
   --resx --resy              Virtual display resolution (default = --w x --h)
   --w --h --fps --bitrate    Pixel size / frame rate / bitrate of the stream
+  --video-codec <h264|vp8>  Encoder for the video stream (default h264)
   --display   <N>            Xvfb display number (default 99)
-  --vcapture  <file>         Tee exact raw video bytes (IVF) to a file for offline repro
+  --vcapture  <file>         Tee exact raw video bytes (IVF or Annex-B) to a file for offline repro
   --check                   Verify required binaries + games.json and exit
 
 Example:
@@ -285,7 +287,7 @@ function startWm() {
 // ── 4 + 5) ffmpeg capture → IVF (video) / Ogg (audio) ────────────────────────
 const KIND = { VCONF: 1, VKEY: 2, VDELTA: 3, ACONF: 4, ACHUNK: 5, SNAP: 6 };
 
-let ws = null, wsReady = false, videoProc = null, audioProc = null;
+let ws = null, wsReady = false, videoProc = null, audioProc = null, videoSplitter = null;
 let lastKeyTs = 0;               // monotonic µs stamps (Date.now can jump)
 function ts() { lastKeyTs = Math.max(lastKeyTs + 1, Date.now() * 1000); return lastKeyTs; }
 
@@ -320,7 +322,12 @@ const vcap = (() => {
     return t;
 })();
 function handleVideoChunk(d) {
-    parseIvf(d);
+    if (videoCodec === 'h264') {
+        if (!videoSplitter) videoSplitter = makeAnnexBSplitter((au, key) => sendMedia(key ? KIND.VKEY : KIND.VDELTA, ts(), au));
+        videoSplitter.push(d);
+    } else {
+        parseIvf(d);
+    }
     if (vcap) vcap.write(d);
 }
 function parseIvf(chunk) {
@@ -396,20 +403,96 @@ function onOggPacket(p, granule) {
 function handleAudioChunk(d) { parseOgg(d); }
 
 // ── ffmpeg capture processes ─────────────────────────────────────────────────
+// -- Annex-B / H.264 access-unit splitter --------------------------------------
+// Parses raw Annex-B into access units delimited by Access Unit Delimiters
+// (NAL type 9). -preset ultrafast turns on sliced threading, so several slice
+// NALs make up one picture; splitting on AUD groups them correctly regardless
+// of how many slices x264 emits per frame. SPS/PPS ride inline with the IDR, so
+// the decoder needs no out-of-band description.
+function nalType(nal) { return nal.length ? (nal[0] & 0x1f) : 0; }
+
+function makeAnnexBSplitter(onAccessUnit) {
+    const splitter = {
+        buf: Buffer.alloc(0),
+        pending: [],
+        hasIDR: false,
+        hasVCL: false,
+    };
+    function findStart(from) {
+        const b = splitter.buf;
+        for (let i = from; i + 3 < b.length; i++) {
+            if (b[i] === 0 && b[i + 1] === 0) {
+                if (b[i + 2] === 1) return { idx: i, end: i + 3 };
+                if (b[i + 2] === 0 && b[i + 3] === 1) return { idx: i, end: i + 4 };
+            }
+        }
+        return -1;
+    }
+    function emitNal(nal) {
+        if (!nal.length) return;
+        const t = nalType(nal);
+        if (t === 9 && splitter.hasVCL) flush();
+        splitter.pending.push(Buffer.concat([Buffer.from([0, 0, 0, 1]), nal]));
+        if (t === 5) splitter.hasIDR = true;
+        if (t === 1 || t === 5) splitter.hasVCL = true;
+    }
+    function flush() {
+        if (!splitter.pending.length) return;
+        const au = Buffer.concat(splitter.pending);
+        const key = splitter.hasIDR;
+        splitter.pending = [];
+        splitter.hasIDR = false;
+        splitter.hasVCL = false;
+        onAccessUnit(au, key);
+    }
+    splitter.push = (chunk) => {
+        splitter.buf = splitter.buf.length ? Buffer.concat([splitter.buf, chunk]) : chunk;
+        let start = findStart(0);
+        if (start < 0) return;
+        let next;
+        while ((next = findStart(start.end)) !== -1) {
+            emitNal(splitter.buf.subarray(start.end, next.idx));
+            start = next;
+        }
+        splitter.buf = splitter.buf.subarray(start.idx);
+    };
+    splitter.reset = () => { splitter.buf = Buffer.alloc(0); splitter.pending = []; splitter.hasIDR = false; splitter.hasVCL = false; };
+    return splitter;
+}
+
 function spawnVideo() {
-    const videoArgs = [
-        '-hide_banner', '-loglevel', 'error',
-        '-f', 'x11grab', '-video_size', `${w}x${h}`, '-framerate', String(fps), '-i', displayStr,
-        '-c:v', 'libvpx', '-deadline', 'realtime', '-cpu-used', '6', '-threads', '1',
-        '-b:v', String(bitrate), '-g', String(fps), '-keyint_min', String(fps),
-        '-f', 'ivf', 'pipe:1',
-    ];
-    videoProc = track(spawn('ffmpeg', videoArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
-    videoProc.on('error', onSpawnError('video ffmpeg'));
-    videoProc.stdout.on('data', handleVideoChunk);
-    videoProc.stderr.on('data', (d) => process.stderr.write('[video ffmpeg] ' + d));
-    videoProc.on('exit', (code) => { if (wsReady) console.log(`[full] video ffmpeg exited (${code})`); });
-    console.log(`[full] video capture up (pid=${videoProc.pid}, ${w}x${h}@${fps} → libvpx/vp8 → IVF)${vcap ? ` — tee→${videoCapturePath}` : ''}`);
+    if (videoCodec === 'h264') {
+        const videoArgs = [
+            '-hide_banner', '-loglevel', 'error',
+            '-f', 'x11grab', '-video_size', `${w}x${h}`, '-framerate', String(fps), '-i', displayStr,
+            '-an',
+            '-c:v', 'libx264', '-preset', 'ultrafast', '-tune', 'zerolatency',
+            '-x264-params', 'aud=1', '-profile:v', 'baseline', '-level', '3.1',
+            '-pix_fmt', 'yuv420p', '-g', String(fps * 2),
+            '-b:v', String(bitrate), '-maxrate', String(bitrate), '-bufsize', String(bitrate),
+            '-f', 'h264', 'pipe:1',
+        ];
+        videoProc = track(spawn('ffmpeg', videoArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
+        videoProc.on('error', onSpawnError('video ffmpeg'));
+        videoProc.stderr.on('data', (d) => process.stderr.write('[video ffmpeg] ' + d));
+        videoProc.stdout.on('data', handleVideoChunk);
+        videoProc.on('exit', (code) => { if (wsReady) console.log(`[full] video ffmpeg exited (${code})`); });
+        console.log(`[full] video capture up (pid=${videoProc.pid}, ${w}x${h}@${fps} → libx264 baseline → Annex-B)${vcap ? ` — tee→${videoCapturePath}` : ''}`);
+    } else {
+        const videoArgs = [
+            '-hide_banner', '-loglevel', 'error',
+            '-f', 'x11grab', '-video_size', `${w}x${h}`, '-framerate', String(fps), '-i', displayStr,
+            '-c:v', 'libvpx', '-deadline', 'realtime', '-cpu-used', '6', '-threads', '1',
+            '-b:v', String(bitrate), '-g', String(fps), '-keyint_min', String(fps),
+            '-f', 'ivf', 'pipe:1',
+        ];
+        videoProc = track(spawn('ffmpeg', videoArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
+        videoProc.on('error', onSpawnError('video ffmpeg'));
+        videoProc.stdout.on('data', handleVideoChunk);
+        videoProc.stderr.on('data', (d) => process.stderr.write('[video ffmpeg] ' + d));
+        videoProc.on('exit', (code) => { if (wsReady) console.log(`[full] video ffmpeg exited (${code})`); });
+        console.log(`[full] video capture up (pid=${videoProc.pid}, ${w}x${h}@${fps} → libvpx/vp8 → IVF)${vcap ? ` — tee→${videoCapturePath}` : ''}`);
+    }
 }
 function spawnAudio() {
     const audioArgs = [
@@ -447,6 +530,7 @@ function restartVideo() {
         tryKill(videoProc, 'SIGKILL');
         videoProc = null;
         parseIvf.buf = null; parseIvf.header = null;
+        if (videoSplitter) { videoSplitter.reset(); }
     }
     log('forced fresh keyframe — restarting video encoder');
     spawnVideo();
@@ -455,12 +539,14 @@ function stopCaptures() {
     if (videoProc) { try { videoProc.stdout.removeAllListeners('data'); } catch {} tryKill(videoProc, 'SIGKILL'); videoProc = null; }
     if (audioProc) { try { audioProc.stdout.removeAllListeners('data'); } catch {} tryKill(audioProc, 'SIGKILL'); audioProc = null; }
     parseIvf.buf = null; parseIvf.header = null;
+    if (videoSplitter) { videoSplitter.reset(); }
     parseOgg.buf = null; parseOgg.carry = null; parseOgg.page = 0; skipPackets = 2;
 }
 function stopCaptures() {
     if (videoProc) { try { videoProc.stdout.removeAllListeners('data'); } catch {} tryKill(videoProc, 'SIGKILL'); videoProc = null; }
     if (audioProc) { try { audioProc.stdout.removeAllListeners('data'); } catch {} tryKill(audioProc, 'SIGKILL'); audioProc = null; }
     parseIvf.buf = null; parseIvf.header = null;
+    if (videoSplitter) { videoSplitter.reset(); }
     parseOgg.buf = null; parseOgg.carry = null; parseOgg.page = 0; skipPackets = 2;
 }
 
@@ -599,7 +685,7 @@ function connect() {
                        motd: (motd || '').replace(/\\n/gi, '\n').replace(/\\t/gi, '\t') || null,
                        games: sanitizeGames() },
         }));
-        ws.send(JSON.stringify({ t: 'vconfig', config: { codec: 'vp8', codedWidth: w, codedHeight: h } }));
+        ws.send(JSON.stringify({ t: 'vconfig', config: { codec: videoCodec === 'vp8' ? 'vp8' : 'avc1.42001f', codedWidth: w, codedHeight: h } }));
         ws.send(JSON.stringify({ t: 'aconfig', config: { codec: 'opus', sampleRate: 48000, numberOfChannels: 2 } }));
         if (currentGameKey) {
             const g = GAMES.find((x) => x.key === currentGameKey);
