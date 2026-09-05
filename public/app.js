@@ -800,6 +800,11 @@ async function configureVideo(config) {
         codedWidth: config.codedWidth || 640,
         codedHeight: config.codedHeight || 480,
         optimizeForLatency: true,
+        // Force the software decoder: GPU/hardware VP8 & H.264 decode paths are
+        // flaky on some Windows drivers and periodically emit "Decoding error",
+        // which is exactly the intermittent failure this fixes. Software decode
+        // of a 640x480 VP8 stream is cheap (near-zero CPU cost).
+        hardwareAcceleration: 'prefer-software',
     };
     // Provide the avcC `description` so the decoder knows lengthSizeMinusOne=4
     // (byte 0xFF in the record) and can parse the 4-byte-length avcC chunks we
