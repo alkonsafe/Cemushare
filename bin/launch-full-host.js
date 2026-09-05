@@ -93,6 +93,8 @@ const resY       = Number(arg('--resy', String(h), 'EMULATOR_RES_Y'));
 const videoCodec = arg('--video-codec', process.env.EMULATOR_VIDEO_CODEC || 'h264', 'EMULATOR_VIDEO_CODEC');
 const videoCapturePath = arg('--vcapture', '', 'EMULATOR_VCAPTURE');
 const keyFilter  = arg('--keys', process.env.EMULATOR_KEYS || 'all', 'EMULATOR_KEYS');
+const canvasW  = arg('--cw', process.env.EMULATOR_CW || '', 'EMULATOR_CW');
+const canvasH  = arg('--ch', process.env.EMULATOR_CH || '', 'EMULATOR_CH');
 
 function usage() {
     console.log(`
@@ -112,6 +114,8 @@ Options:
   --resx --resy              Virtual display resolution (default = --w x --h)
   --w --h --fps --bitrate    Pixel size / frame rate / bitrate of the stream
   --video-codec <h264|vp8>  Encoder for the video stream (default h264)
+  --cw --ch   <N>           CSS size of the viewer's canvas container (pixels).
+                            Default: viewer keeps its built-in 720x550 box.
   --keys      <all|none|list>  Which keys viewers may send: 'all', 'none', or a
                                comma-separated allowlist (DOM codes KeyW/ArrowUp/
                                Space or xdotool names w/Up/space; e.g. w,a,s,d,space)
@@ -758,7 +762,10 @@ function connect() {
                        motd: (motd || '').replace(/\\n/gi, '\n').replace(/\\t/gi, '\t') || null,
                        games: sanitizeGames() },
         }));
-        ws.send(JSON.stringify({ t: 'vconfig', config: { codec: videoCodec === 'vp8' ? 'vp8' : 'avc1.42001f', codedWidth: w, codedHeight: h } }));
+        const cfg = { codec: videoCodec === 'vp8' ? 'vp8' : 'avc1.42001f', codedWidth: w, codedHeight: h };
+        if (canvasW) cfg.viewWidth = Number(canvasW);
+        if (canvasH) cfg.viewHeight = Number(canvasH);
+        ws.send(JSON.stringify({ t: 'vconfig', config: cfg }));
         ws.send(JSON.stringify({ t: 'aconfig', config: { codec: 'opus', sampleRate: 48000, numberOfChannels: 2 } }));
         if (currentGameKey) {
             const g = GAMES.find((x) => x.key === currentGameKey);

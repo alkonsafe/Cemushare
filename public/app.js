@@ -795,6 +795,23 @@ async function configureVideo(config) {
     let ctx = canvas.getContext('2d');
     if (ctx) ctx.imageSmoothingEnabled = false;
 
+// Optional CSS container size from the host (--cw / --ch). The canvas fills
+    // the container via w-full/h-full object-contain, so these set the visible
+    // box. If only one dimension is given, the other derives from the stream
+    // aspect ratio so nothing gets squished.
+    if (config.viewWidth || config.viewHeight) {
+        const box = document.getElementById('consoleViewerContainer');
+        if (box) {
+            const cw = config.codedWidth || 640;
+            const ch = config.codedHeight || 480;
+            const vw = Number(config.viewWidth) || 0;
+            const vh = Number(config.viewHeight) || 0;
+            if (vw && vh) { box.style.width = `${vw}px`; box.style.height = `${vh}px`; }
+            else if (vw) { box.style.width = `${vw}px`; box.style.height = `${Math.round(vw * ch / cw)}px`; }
+            else if (vh) { box.style.height = `${vh}px`; box.style.width = `${Math.round(vh * cw / ch)}px`; }
+        }
+    }
+
     decoderConfig = {
         codec: config.codec,
         codedWidth: config.codedWidth || 640,
