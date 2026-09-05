@@ -378,13 +378,13 @@ function startCaptures() {
         '-f', 'ogg', 'pipe:1',
     ];
     console.log(`[full] starting video capture: Xvfb ${w}x${h}@${fps} → libvpx/vp8 → IVF`);
-    videoProc = track(spawn('ffmpeg', videoArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'ignore'] }));
+    videoProc = track(spawn('ffmpeg', videoArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
     videoProc.on('error', onSpawnError('video ffmpeg'));
     videoProc.stdout.on('data', handleVideoChunk);
     videoProc.stderr.on('data', (d) => process.stderr.write('[video ffmpeg] ' + d));
     videoProc.on('exit', (code) => { if (wsReady) console.log(`[full] video ffmpeg exited (${code})`); });
 
-    audioProc = track(spawn('ffmpeg', audioArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'ignore'] }));
+    audioProc = track(spawn('ffmpeg', audioArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
     audioProc.on('error', onSpawnError('audio ffmpeg'));
     audioProc.stdout.on('data', handleAudioChunk);
     audioProc.stderr.on('data', (d) => process.stderr.write('[audio ffmpeg] ' + d));
