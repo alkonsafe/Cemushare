@@ -1305,21 +1305,10 @@ function flushInput(msg) {
 // the server (a single [code] on keydown with no keyup would leave buttons
 // stuck down forever and pin the game for everyone).
 //
-// KEYMAP remaps a few convenience aliases (WASD -> arrows, K -> X, J -> C,
-// Shift -> Space). Unlike the old behavior it is NOT a whitelist: any key not
-// in KEYMAP is forwarded with its raw e.code, so the full keyboard reaches the
-// host, which can filter with its own --keys allowlist.
+// Keys are forwarded with their raw e.code — no aliasing. WASD must reach the
+// game as KeyW/KeyA/KeyS/KeyD so games bound to those keys work; the host is
+// the single place that filters (--keys allowlist).
 const heldInputKeys = new Set();
-const KEYMAP = {
-    ArrowUp: 'ArrowUp', KeyW: 'ArrowUp',
-    ArrowDown: 'ArrowDown', KeyS: 'ArrowDown',
-    ArrowLeft: 'ArrowLeft', KeyA: 'ArrowLeft',
-    ArrowRight: 'ArrowRight', KeyD: 'ArrowRight',
-    KeyX: 'KeyX', KeyK: 'KeyX',
-    KeyC: 'KeyC', KeyJ: 'KeyC',
-    Space: 'Space', ShiftLeft: 'Space',
-    Enter: 'Enter',
-};
 // Keys that are pure modifiers / browser-reserved and must never reach the host.
 const NON_FORWARDABLE = new Set([
     'ControlLeft', 'ControlRight', 'AltLeft', 'AltRight',
@@ -1327,11 +1316,9 @@ const NON_FORWARDABLE = new Set([
     'F1', 'F3', 'F5', 'F6', 'F7', 'F8', 'F9', 'F10', 'F11', 'F12',
 ]);
 function setInputKey(code, down) {
-    const mapped = KEYMAP[code] || code;
-    if (!mapped) return;
-    const had = heldInputKeys.has(mapped);
-    if (down) heldInputKeys.add(mapped); else heldInputKeys.delete(mapped);
-    if (heldInputKeys.has(mapped) !== had) flushInput({ mouse: null });
+    const had = heldInputKeys.has(code);
+    if (down) heldInputKeys.add(code); else heldInputKeys.delete(code);
+    if (heldInputKeys.has(code) !== had) flushInput({ mouse: null });
 }
 
 window.addEventListener('keydown', (e) => {
