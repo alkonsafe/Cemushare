@@ -229,6 +229,7 @@ function makeConsoleState(key, name) {
         audioConfig: null,
         lastKeyframe: null,
         keyframeRequestedAt: 0,
+        hardkeyRequestedAt: 0,
         lastVideoAt: Date.now(),
         reloadSentAt: 0,
         stats: { frames: 0, bytes: 0, since: Date.now() },
@@ -588,6 +589,16 @@ function requestKeyframe(cons) {
     logV(`keyframe: requesting keyframe from host "${cons.key}"`);
     sendHost(cons, { t: 'keyframe' });
 }
+// Urgent flavor: sent by a viewer whose decoder hit an error. The host restarts
+// its video encoder (fresh GOP) for an immediate resync; routine `keyframe` is a
+// no-op there because natural GOPs already arrive every second.
+function hardKeyframe(cons) {
+    const now = Date.now();
+    if (now - (cons.hardkeyRequestedAt || 0) < 500) return;
+    cons.hardkeyRequestedAt = now;
+    logV(`keyframe: URGENT keyframe from host "${cons.key}"`);
+    sendHost(cons, { t: 'hardkey' });
+}
 
 // ── Snapshots ─────────────────────────────────────────────────────────────────
 // The host JPEG-encodes the current frame and pushes it to us as a SNAP frame
@@ -733,6 +744,7 @@ function handleViewerMsg(cons, v, msg) {
             break;
         }
         case 'needkey': requestKeyframe(cons); break;
+        case 'hardkey': hardKeyframe(cons); break;
         case 'modevote': {
             const want = msg.mode === 'democracy' ? 'democracy' : 'anarchy';
             log(`vote: ${v.username} proposes ${want} mode on "${cons.key}"`);

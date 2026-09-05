@@ -864,9 +864,9 @@ async function configureVideo(config) {
         if (decoderConfig) {
             try { videoDecoder.configure(decoderConfig); } catch {}
         }
-        // Ask the host to emit a fresh keyframe NOW so we resync immediately
-        // instead of freezing until the next natural GOP boundary.
-        requestKeyframe();
+        // Ask the host to force a fresh keyframe NOW (restart the encoder) so we
+        // resync immediately instead of freezing until the next natural GOP.
+        requestHardKeyframe();
     };
 
     videoDecoder = new VideoDecoder({ output: __decoderOutputFn, error: __decoderErrorFn });
@@ -910,7 +910,16 @@ function ensureAvcDescription() {
 const MAX_DECODE_QUEUE = 8;
 
 function requestKeyframe() {
+    // Routine request - the host's natural `-g fps` keyframes (every second)
+    // already cover resync, so this only nudges it along. The host does NOT
+    // restart its encoder for plain `needkey`.
     if (streamWs && streamWs.readyState === 1) streamWs.send(JSON.stringify({ t: 'needkey' }));
+}
+
+function requestHardKeyframe() {
+    // Urgent request after a decode error - the host restarts its video encoder,
+    // which re-emits a brand-new keyframe immediately.
+    if (streamWs && streamWs.readyState === 1) streamWs.send(JSON.stringify({ t: 'hardkey' }));
 }
 
 function decodeVideo(kind, timestamp, payload) {

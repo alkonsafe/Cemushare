@@ -378,8 +378,8 @@ function spawnVideo() {
     const videoArgs = [
         '-hide_banner', '-loglevel', 'error',
         '-f', 'x11grab', '-video_size', `${w}x${h}`, '-framerate', String(fps), '-i', displayStr,
-        '-c:v', 'libvpx', '-deadline', 'realtime', '-cpu-used', '6', '-threads', '2',
-        '-b:v', String(bitrate), '-g', String(fps), '-keyint_min', String(fps), '-row-mt', '1',
+        '-c:v', 'libvpx', '-deadline', 'realtime', '-cpu-used', '6', '-threads', '1',
+        '-b:v', String(bitrate), '-g', String(fps), '-keyint_min', String(fps),
         '-f', 'ivf', 'pipe:1',
     ];
     videoProc = track(spawn('ffmpeg', videoArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
@@ -409,9 +409,11 @@ function startCaptures() {
     spawnAudio();
 }
 // A fresh ffmpeg instance always opens with a brand-new keyframe, so restarting
-// the video encoder is the dirt-simple way to honor the relay's `keyframe`
-// request (new viewers / decode resyncs) even though `-g fps` already yields a
-// natural intra frame every second.
+// the video encoder is the dirt-simple way to honor the relay's urgent `hardkey`
+// request (a viewer hit a decode error and wants an instant resync). Routine
+// `keyframe`/`needkey` requests are no-ops - the `-g fps` config already emits a
+// natural intra frame every second. Restarting is throttled because the moment a
+// restart happens the encoder rebuilds its quantum buffers (~100-200ms gap).
 let lastKeyframeRestartAt = 0;
 const KEYFRAME_RESTART_MS = 3000;
 function restartVideo() {
@@ -587,7 +589,8 @@ function connect() {
         let msg; try { msg = JSON.parse(ev.data); } catch { return; }
         switch (msg.t) {
             case 'input': applyInput(msg.keys, msg.mouse); break;
-            case 'keyframe': restartVideo(); break;
+            case 'keyframe': break;                          // routine - natural -g keyframes every second suffice
+            case 'hardkey': restartVideo(); break;           // urgent - a viewer hit a decode error, force fresh GOP
             case 'snapshot': takeSnapshot(); break;
             case 'reload': log('relay asked for a reload — restarting capture'); startCaptures(); break;
             case 'launch': launchGame(msg.game); break;
