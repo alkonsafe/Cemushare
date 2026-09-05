@@ -160,6 +160,12 @@ const childEnv = (extra) => ({ ...process.env, DISPLAY: displayStr, ...(extra ||
 // ── Process plumbing ──────────────────────────────────────────────────────────
 const children = [];
 function track(child) { children.push(child); return child; }
+// A spawn that fails to start (ENOENT/EACCES) fires an `error` event; with no
+// listener that is an uncaught exception that kills the whole host. Always
+// attach one so a broken child can never take the host down with it.
+function onSpawnError(label) {
+    return (err) => console.error(`[full] ${label}: failed to start — ${err.message}`);
+}
 // Plain kill for non-detached children (Xvfb/xfwm4/pulse/ffmpeg) — negative-pid
 // kills would signal our own process group.
 function tryKill(child, sig = 'SIGTERM') {
@@ -183,6 +189,7 @@ function startXvfb(rt) {
     const screen = `${resX || w}x${resY || h}x24`;
     const xvfb = track(spawn('Xvfb', [displayStr, '-screen', '0', screen, '-nolisten', 'tcp'],
         { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
+    xvfb.on('error', onSpawnError('Xvfb'));
     xvfb.stdout.on('data', () => {});
     xvfb.stderr.on('data', (d) => process.stderr.write(d));
     return xvfb;
@@ -208,6 +215,7 @@ function startPulse(rt) {
     pulse = track(spawn('pulseaudio',
         ['--daemonize=no', '--disallow-exit', '--exit-idle-time=-1'],
         { env: pulseEnv, stdio: ['ignore', 'pipe', 'pipe'] }));
+    pulse.on('error', onSpawnError('pulseaudio'));
     pulse.stderr.on('data', () => {});
     pulse.stdout.on('data', () => {});
     return new Promise((resolve) => {
@@ -229,6 +237,7 @@ function setupNullSink(rt) {
 // ── 3) Start xfwm4 (window manager) ──────────────────────────────────────────
 function startWm() {
     const wm = track(spawn('xfwm4', [], { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
+    wm.on('error', onSpawnError('xfwm4'));
     wm.stderr.on('data', () => {});
     wm.stdout.on('data', () => {});
     return wm;
@@ -343,11 +352,13 @@ function startCaptures() {
     ];
     console.log(`[full] starting video capture: Xvfb ${w}x${h}@${fps} → libvpx/vp8 → IVF`);
     videoProc = track(spawn('ffmpeg', videoArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'ignore'] }));
+    videoProc.on('error', onSpawnError('video ffmpeg'));
     videoProc.stdout.on('data', handleVideoChunk);
     videoProc.stderr.on('data', (d) => process.stderr.write(d));
     videoProc.on('exit', (code) => { if (wsReady) console.log(`[full] video ffmpeg exited (${code})`); });
 
     audioProc = track(spawn('ffmpeg', audioArgs, { env: childEnv(), stdio: ['ignore', 'pipe', 'ignore'] }));
+    audioProc.on('error', onSpawnError('audio ffmpeg'));
     audioProc.stdout.on('data', handleAudioChunk);
     audioProc.stderr.on('data', (d) => process.stderr.write(d));
     audioProc.on('exit', (code) => { if (wsReady) console.log(`[full] audio ffmpeg exited (${code})`); });
@@ -365,6 +376,7 @@ function takeSnapshot() {
         '-f', 'x11grab', '-video_size', `${w}x${h}`, '-i', displayStr, '-frames:v', '1',
         '-f', 'image2pipe', '-vcodec', 'mjpeg', '-q:v', '4', 'pipe:1'],
         { env: childEnv(), stdio: ['ignore', 'pipe', 'ignore'] });
+    proc.on('error', onSpawnError('snapshot ffmpeg'));
     let jpeg = Buffer.alloc(0);
     proc.stdout.on('data', (d) => { jpeg = Buffer.concat([jpeg, d]); });
     proc.stdout.on('end', () => { if (jpeg.length) sendMedia(KIND.SNAP, ts(), jpeg); });
@@ -393,14 +405,24 @@ function domToXdotool(code) {
 }
 function xd(args) { try { spawnSync('xdotool', args, { env: childEnv(), stdio: 'ignore' }); } catch {} }
 
+// Fire-and-forget xdotool call: never let a failed spawn take the host down.
+function fireXdotool(args, delayMs) {
+    const run = () => {
+        const c = spawn('xdotool', args, { env: childEnv(), stdio: 'ignore' });
+        c.on('error', () => {});
+        c.unref();
+    };
+    if (delayMs) setTimeout(run, delayMs); else run();
+}
+
 const heldKeys = new Set();
 function applyInput(keys, mouse) {
     const desired = new Set((keys || []).map((k) => domToXdotool(k)).filter(Boolean));
     for (const k of [...heldKeys]) {
-        if (!desired.has(k)) { try { spawn('xdotool', ['keyup', k], { env: childEnv(), stdio: 'ignore' }).unref(); } catch {} heldKeys.delete(k); }
+        if (!desired.has(k)) { fireXdotool(['keyup', k]); heldKeys.delete(k); }
     }
     for (const k of [...desired]) {
-        if (!heldKeys.has(k)) { try { spawn('xdotool', ['keydown', k], { env: childEnv(), stdio: 'ignore' }).unref(); } catch {} heldKeys.add(k); }
+        if (!heldKeys.has(k)) { fireXdotool(['keydown', k]); heldKeys.add(k); }
     }
     if (mouse) {
         // Viewer coords are in stream pixel space (0..w, 0..h). If the virtual
@@ -408,11 +430,11 @@ function applyInput(keys, mouse) {
         const dispW = resX || w, dispH = resY || h;
         const x = Math.max(0, Math.min(dispW - 1, Math.round(mouse.x * dispW / w)));
         const y = Math.max(0, Math.min(dispH - 1, Math.round(mouse.y * dispH / h)));
-        try { spawn('xdotool', ['mousemove', String(x), String(y)], { env: childEnv(), stdio: 'ignore' }).unref(); } catch {}
+        fireXdotool(['mousemove', String(x), String(y)]);
         if (mouse.click) {
             const btn = String(mouse.button || 1);
-            try { spawn('xdotool', ['mousedown', btn], { env: childEnv(), stdio: 'ignore' }).unref(); } catch {}
-            setTimeout(() => { try { spawn('xdotool', ['mouseup', btn], { env: childEnv(), stdio: 'ignore' }).unref(); } catch {} }, 60);
+            fireXdotool(['mousedown', btn]);
+            fireXdotool(['mouseup', btn], 60);
         }
     }
 }
@@ -440,6 +462,14 @@ function launchGame(key) {
         gameChild.stdout.on('data', () => {});
         currentGameKey = key;
         broadcastState();
+        gameChild.on('error', (err) => {
+            // e.g. ENOENT — the game binary isn't installed. This must NOT kill
+            // the host: log it, clear state, keep the desktop streaming.
+            console.error(`[full] failed to launch game "${g.name}": ${err.message}`);
+            console.error(`[full]   command was: ${g.command.join(' ')} — check games.json paths`);
+            if (currentGameKey === key) { currentGameKey = null; gameChild = null; }
+            broadcastState();
+        });
         gameChild.on('exit', () => { console.log(`[full] game "${g.name}" exited`); if (currentGameKey === key) { currentGameKey = null; killGameTree(gameChild, 'SIGKILL'); gameChild = null; broadcastState(); } });
     } catch (err) {
         console.error(`[full] failed to launch game: ${err.message}`);
