@@ -505,6 +505,8 @@ function renderTutorialStep() {
     const step = steps[tutorialIndex];
     document.getElementById('tutorialTitle').innerHTML = brandHTML(step.title);
     document.getElementById('tutorialBody').innerHTML = '<p class="text-gray-700 dark:text-gray-300 text-sm">' + brandHTML(step.body) + '</p>';
+    document.getElementById('tutorialDots').innerHTML = steps.map((_, i) =>
+        `<span class="w-2 h-2 rounded-full ${i === tutorialIndex ? 'bg-blue-600' : 'bg-gray-300 dark:bg-gray-600'}"></span>`).join('');
     document.getElementById('tutorialPrevBtn').classList.toggle('hidden', tutorialIndex === 0);
     document.getElementById('tutorialNextBtn').textContent =
         tutorialIndex === steps.length - 1 ? 'Done' : 'Next';
