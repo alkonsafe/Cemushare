@@ -1,0 +1,16 @@
+{
+  "_comment": "Copy this file to games.json to enable voting on a full host (npm run host-full). One entry per launchable game: key (unique id), name (shown to viewers), command (argv, first item on PATH or absolute path). cwd/env optional.",
+  "games": [
+    {
+      "key": "srb2",
+      "name": "Sonic Robo Blast 2",
+      "command": ["/usr/bin/srb2", "-opengl"]
+    },
+    {
+      "key": "dosbox",
+      "name": "DOSBox",
+      "command": ["/usr/bin/dosbox"],
+      "env": { "SDL_FULLSCREEN": "0" }
+    }
+  ]
+}

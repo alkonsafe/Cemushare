@@ -563,6 +563,11 @@ let playHead = 0;
 let waitingForKeyframe = true;
 let streamStatusEl = null;
 
+// Full-host games (viewable + launchable on consoles that advertise them).
+let gamesList = [];
+let currentGameKey = null;
+let gameVote = null;      // { game, by, yes:[..], no:[..], needed, endsAt } while open
+
 function streamWsUrl(consoleName) {
     const token = localStorage.getItem('token') || '';
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -630,6 +635,7 @@ function handleStreamMessage(msg) {
             }
             if (msg.video) configureVideo(msg.video);
             if (msg.audio) configureAudio(msg.audio);
+            if (Array.isArray(msg.games)) { gamesList = msg.games.slice(0, 50); currentGameKey = msg.current || null; renderGames(); }
             if (!msg.host) setStreamStatus('console is booting…');
             else setStreamStatus('');
             break;
@@ -649,7 +655,85 @@ function handleStreamMessage(msg) {
         case 'chat':
             if (msg.from && msg.text) addChatMessage(msg.from, msg.text, false, false, null);
             break;
+        case 'games':
+            gamesList = Array.isArray(msg.games) ? msg.games.slice(0, 50) : [];
+            currentGameKey = msg.current || null;
+            renderGames();
+            break;
+        case 'gamevote':
+            if (msg.open) {
+                const yes = (msg.yes || []).map((u) => u.name);
+                const no = (msg.no || []).map((u) => u.name);
+                gameVote = { game: msg.game, by: msg.by, yes, no, needed: msg.needed, endsAt: msg.endsAt || 0 };
+            } else {
+                gameVote = null;
+            }
+            renderGames();
+            break;
+        case 'gamestate':
+            if (msg.state && msg.state.game) currentGameKey = msg.state.game;
+            renderGames();
+            break;
     }
+}
+
+// ── Games panel (full-host consoles) ────────────────────────────────────────
+function renderGames() {
+    const panel = document.getElementById('gamesPanel');
+    const box = document.getElementById('gamesBox');
+    if (!panel || !box) return;
+    const visible = gamesList.length > 0 || gameVote || currentGameKey;
+    panel.classList.toggle('hidden', !visible);
+    if (!visible) return;
+
+    let html = '<div class="flex items-center justify-between mb-2">';
+    html += '<h3 class="dark:text-white text-black font-medium">Games</h3>';
+    const running = gamesList.find((g) => g.key === currentGameKey);
+    if (currentGameKey) {
+        html += '<span class="text-xs font-mono px-2 py-1 rounded bg-green-100 dark:bg-green-900 text-green-700 dark:text-green-300">now: ' + escapeHtml(running ? running.name : currentGameKey) + '</span>';
+    }
+    html += '</div>';
+
+    if (gamesList.length) {
+        html += '<div class="flex flex-wrap gap-2">';
+        for (const g of gamesList) {
+            const isRun = g.key === currentGameKey;
+            html += '<button onclick="sendGameVote(\'' + escapeHtml(g.key) + '\')" class="' +
+                (isRun ? 'bg-green-600 hover:bg-green-700' : 'bg-blue-600 hover:bg-blue-700') +
+                ' text-white text-sm font-medium px-3 py-1.5 rounded-md transition-colors" ' +
+                (isRun ? 'disabled' : '') + '>' + escapeHtml(g.name) + '</button>';
+        }
+        html += '</div>';
+    }
+
+    if (gameVote) {
+        const now = Date.now();
+        const secs = Math.max(0, Math.round(((gameVote.endsAt || now) - now) / 1000));
+        const yesN = gameVote.yes.length, noN = gameVote.no.length, need = gameVote.needed || 1;
+        const total = yesN + noN;
+        const pct = (total > 0 ? Math.round((yesN / total) * 100) : 0);
+        html += '<div class="mt-3 pt-3 border-t border-gray-300 dark:border-gray-600">';
+        html += '<div class="text-sm dark:text-gray-200 text-gray-800 mb-1">';
+        html += escapeHtml(gameVote.by) + ' wants to launch <b>' + escapeHtml((gamesList.find((g) => g.key === gameVote.game) || {}).name || gameVote.game) + '</b>';
+        html += ' <span class="text-xs text-gray-500 dark:text-gray-400">(' + yesN + '/' + need + ' needed' + (secs ? ' · ' + secs + 's' : '') + ')</span></div>';
+        html += '<div class="h-2 rounded-full bg-gray-200 dark:bg-gray-600 overflow-hidden mb-2">';
+        html += '<div class="h-full bg-blue-500" style="width:' + Math.min(100, pct) + '%"></div></div>';
+        html += '<div class="flex gap-2">';
+        html += '<button onclick="sendGameCast(\'' + escapeHtml(gameVote.game) + '\',true)" class="bg-green-600 hover:bg-green-700 text-white text-xs font-medium px-3 py-1 rounded-md transition-colors">Yes (' + yesN + ')</button>';
+        html += '<button onclick="sendGameCast(\'' + escapeHtml(gameVote.game) + '\',false)" class="bg-red-600 hover:bg-red-700 text-white text-xs font-medium px-3 py-1 rounded-md transition-colors">No (' + noN + ')</button>';
+        html += '</div></div>';
+    }
+
+    box.innerHTML = html;
+}
+
+function sendGameVote(game) {
+    if (!streamWs || streamWs.readyState !== WebSocket.OPEN) return;
+    streamWs.send(JSON.stringify({ t: 'gamevote', game }));
+}
+function sendGameCast(game, yes) {
+    if (!streamWs || streamWs.readyState !== WebSocket.OPEN) return;
+    streamWs.send(JSON.stringify({ t: 'gamecast', game, yes }));
 }
 
 function setStreamStatus(text) {

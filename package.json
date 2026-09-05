@@ -8,6 +8,7 @@
     "start": "node server.js",
     "host-static": "node host/serve-host.js",
     "host-console": "node bin/launch-host.js",
+    "host-full": "node bin/launch-full-host.js",
     "test": "node test/protocol.test.js",
     "test:e2e": "node test/e2e.js"
   },

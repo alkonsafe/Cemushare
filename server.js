@@ -233,7 +233,25 @@ function makeConsoleState(key, name) {
         reloadSentAt: 0,
         stats: { frames: 0, bytes: 0, since: Date.now() },
         vote: null, voteCooldownUntil: 0,
+        games: [],                    // offered games (full-host consoles) [{key,name}]
+        currentGame: null,            // key of the game the full host is running
+        gameVote: null, gameVoteCooldownUntil: 0,
     };
+}
+
+// Full hosts advertise games viewers can vote to launch. The host only sends
+// key/name; we defensively strip anything else and dedupe by key.
+function sanitizeGameList(list) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const g of list) {
+        if (!g || g.key == null) continue;
+        const key = String(g.key).slice(0, 48);
+        if (out.some((x) => x.key === key)) continue;
+        out.push({ key, name: String(g.name || g.key).slice(0, 64), description: String(g.description || '').slice(0, 120) || null });
+        if (out.length >= 50) break;
+    }
+    return out;
 }
 
 // ── Media framing ────────────────────────────────────────────────────────────
@@ -515,6 +533,11 @@ function attachHost(ws, consoleParam) {
                 else log(`host "${cons.name}" (${consoleKey}): re-registered (was already online)`);
                 qTouchConsole.run(Date.now(), consoleKey);
                 if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'registered', key: consoleKey, name: cons.name }));
+                cons.games = sanitizeGameList(meta.games);
+                if (cons.games.length) {
+                    log(`games: "${cons.key}" advertises ${cons.games.length} launchable game(s)`);
+                    broadcastJson(cons, { t: 'games', games: cons.games, current: cons.currentGame });
+                }
                 break;
             }
             default:
@@ -529,7 +552,11 @@ function attachHost(ws, consoleParam) {
                     log(`host ${cons.key}: audio config ${msg.config ? `${msg.config.codec} ${msg.config.sampleRate || ''}Hz` : '(null)'}`);
                     broadcastJson(cons, { t: 'aconfig', config: cons.audioConfig });
                 }
-                else if (msg.t === 'gamestate') broadcastJson(cons, { t: 'gamestate', state: msg.state });
+                else if (msg.t === 'gamestate') {
+                    cons.currentGame = (msg.state && msg.state.game) || null;
+                    broadcastJson(cons, { t: 'gamestate', state: msg.state });
+                    if (cons.games.length) broadcastJson(cons, { t: 'games', games: cons.games, current: cons.currentGame });
+                }
                 else if (msg.t === 'log') log(`host:${cons.key}]`, String(msg.text || '').slice(0, 300));
                 break;
         }
@@ -650,6 +677,8 @@ function attachViewer(ws, consoleParam, user) {
         host: cons.hostAlive,
         video: cons.videoConfig,
         audio: cons.audioConfig,
+        games: cons.games,
+        current: cons.currentGame,
     });
     if (cons.lastKeyframe) { try { ws.send(cons.lastKeyframe); } catch {} }
     requestKeyframe(cons);
@@ -669,6 +698,12 @@ function attachViewer(ws, consoleParam, user) {
             cons.vote.no.delete(v.id);
             broadcastJson(cons, voteSnapshot(cons));
             tallyVote(cons);
+        }
+        if (cons.gameVote) {
+            cons.gameVote.yes.delete(v.id);
+            cons.gameVote.no.delete(v.id);
+            broadcastJson(cons, gameVoteSnapshot(cons));
+            tallyGameVote(cons);
         }
         cons.democracyVoters.delete(v.id);
         broadcastRoster(cons);
@@ -705,6 +740,13 @@ function handleViewerMsg(cons, v, msg) {
             break;
         }
         case 'votecast': castVote(cons, v, msg.yes === true); break;
+        case 'gamevote': {
+            const game = String(msg.game || '').slice(0, 48);
+            log(`gamevote: ${v.username} proposes to launch "${game}" on "${cons.key}"`);
+            openGameVote(cons, v, game);
+            break;
+        }
+        case 'gamecast': castGameVote(cons, v, String(msg.game || '').slice(0, 48), msg.yes === true); break;
         default: break;
     }
 }
@@ -786,6 +828,58 @@ function tallyVote(cons) {
     }
 }
 
+// ── Game votes (per console, full-host consoles) ────────────────────────────
+// Viewers pick a game from the advertised list, vote, and on a pass the relay
+// tells the full host to launch it. Mirrors the mode-vote flow above.
+function gameVoteSnapshot(cons) {
+    const gv = cons.gameVote;
+    if (!gv) return { t: 'gamevote', open: false };
+    const naming = (ids) => [...ids].map((id) => cons.viewers.get(id)).filter(Boolean)
+        .map((x) => ({ id: x.id, name: x.username }));
+    return { t: 'gamevote', open: true, game: gv.game, by: gv.byName,
+        yes: naming(gv.yes), no: naming(gv.no), needed: votesNeeded(cons), endsAt: gv.endsAt || 0 };
+}
+
+function openGameVote(cons, v, game) {
+    const now = Date.now();
+    if (!game || !cons.games.some((g) => g.key === game)) return;   // not an offered game
+    if (cons.gameVote) return;                                      // a game vote is running
+    if (game === cons.currentGame) { send(v, { t: 'notice', text: 'that game is already running' }); return; }
+    if (now < cons.gameVoteCooldownUntil) { send(v, { t: 'notice', text: 'a game vote just finished — give it a few seconds' }); return; }
+    cons.gameVote = { game, byName: v.username, byId: v.id, yes: new Set([v.id]), no: new Set(), endsAt: now + VOTE_MS };
+    broadcastJson(cons, gameVoteSnapshot(cons));
+    tallyGameVote(cons);
+}
+function castGameVote(cons, v, game, yes) {
+    const gv = cons.gameVote;
+    if (!gv || game !== gv.game) return;
+    gv.yes.delete(v.id);
+    gv.no.delete(v.id);
+    (yes ? gv.yes : gv.no).add(v.id);
+    logV(`gamevote: ${v.username} voted ${yes ? 'yes' : 'no'} (${gv.yes.size} yes / ${gv.no.size} no) on "${cons.key}"`);
+    broadcastJson(cons, gameVoteSnapshot(cons));
+    tallyGameVote(cons);
+}
+function tallyGameVote(cons) {
+    const gv = cons.gameVote;
+    if (!gv) return;
+    const need = votesNeeded(cons);
+    const expired = Date.now() >= gv.endsAt;
+    const passed = gv.yes.size >= need || (expired && gv.yes.size > gv.no.size);
+    if (!passed && !expired) return;
+    const won = gv.game, by = gv.byName;
+    cons.gameVote = null;
+    cons.gameVoteCooldownUntil = Date.now() + VOTE_COOLDOWN_MS;
+    log(`gamevote: "${cons.key}" ${passed ? 'PASSED' : 'FAILED'} launch of "${won}" (proposed by ${by})`);
+    broadcastJson(cons, { t: 'gamevote', open: false, passed, game: won, by });
+    if (passed) {
+        cons.currentGame = won;
+        log(`gamevote: asking host "${cons.key}" to launch "${won}"`);
+        sendHost(cons, { t: 'launch', game: won });
+        if (cons.games.length) broadcastJson(cons, { t: 'games', games: cons.games, current: cons.currentGame });
+    }
+}
+
 // ── Controller merge (per console) ──────────────────────────────────────────
 function mergeAnarchy(cons, active) {
     const out = new Set();
@@ -856,6 +950,7 @@ setInterval(() => {
     for (const cons of consoles.values()) {
         if (cons.viewers.size > 0) requestKeyframe(cons);
         if (cons.vote) tallyVote(cons);
+        if (cons.gameVote) tallyGameVote(cons);
     }
 }, 2000);
 
