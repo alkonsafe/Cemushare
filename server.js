@@ -502,7 +502,7 @@ function attachHost(ws, consoleParam) {
                 cons = registerConsole({ ...meta, key: consoleKey, last_seen: Date.now() });
                 if (!cons) return;
                 cons.name = meta.name || consoleKey;
-                cons.motd = String(meta.motd || '').slice(0, CHAT_MAX_LEN).trim() || null;
+                cons.motd = String(meta.motd || '').slice(0, CHAT_MAX_LEN).trim() || 'Welcome, $user!';
                 if (cons.hostSock !== ws) {
                     if (cons.hostSock) { try { cons.hostSock.close(4000, 'replaced'); } catch {} }
                     cons.hostSock = ws;
@@ -637,9 +637,10 @@ function attachViewer(ws, consoleParam, user) {
     cons.viewers.set(v.id, v);
     log(`viewer "${v.username}" (${v.id}) joined console "${cons.key}" (${cons.viewers.size} online)`);
 
-    if (cons.motd) {
-        log(`motd: ${cons.key} -> chat <Console> ${cons.motd}`);
-        broadcastJson(cons, { t: 'chat', from: 'Console', text: cons.motd, userId: null, motd: true });
+    const motdText = (cons.motd || '').replace(/\$user/gi, v.username);
+    if (motdText && motdText.trim()) {
+        log(`motd: ${cons.key} -> chat <Console> ${motdText}`);
+        broadcastJson(cons, { t: 'chat', from: 'Console', text: motdText, userId: null, motd: true });
     }
 
     send(v, {
