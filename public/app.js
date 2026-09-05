@@ -546,6 +546,12 @@ function connectStreamWs(consoleName) {
 function handleStreamMessage(msg) {
     switch (msg && msg.t) {
         case 'welcome':
+            if (msg.error) {
+                currentConsoleName = null;
+                setStreamStatus('console is gone');
+                if (streamWs) { try { streamWs.close(); } catch {} streamWs = null; }
+                break;
+            }
             if (msg.video) configureVideo(msg.video);
             if (msg.audio) configureAudio(msg.audio);
             if (!msg.host) setStreamStatus('console is booting…');

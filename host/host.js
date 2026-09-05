@@ -172,11 +172,12 @@ installGlScaling(window.WebGL2RenderingContext && WebGL2RenderingContext.prototy
 // own canvas; the width/height setter above then caps it to MAX_DIM while
 // preserving aspect.
 
-const KIND = { VCONF: 1, VKEY: 2, VDELTA: 3, ACONF: 4, ACHUNK: 5 };
+const KIND = { VCONF: 1, VKEY: 2, VDELTA: 3, ACONF: 4, ACHUNK: 5, SNAP: 6 };
 
 let ws = null, wsReady = false, wantKeyframe = true;
 let videoEncoder = null, audioEncoder = null, sentVideoConfig = false, sentAudioConfig = false;
 let capturedAudioStream = null;
+let snapshotPending = false;
 
 function log(...a) {
     console.log('[host]', ...a);
@@ -301,10 +302,33 @@ async function startVideo(canvas) {
     const frameMs = 1000 / FPS;
     let lastEncodeAt = 0;
     let n = 0;
+    let snapCanvas = null, snapCtx = null;
     for (;;) {
         track.requestFrame();               // capture the newest canvas pixels now
         const { value: videoFrame, done } = await reader.read();
         if (done) break;
+        if (snapshotPending) {
+            try {
+                // Draw the latest video frame to a plain 2D canvas and JPEG-encode
+                // it, then ship it to the relay as a SNAP frame so the server can
+                // use it as the console's thumbnail.
+                if (!snapCanvas) { snapCanvas = document.createElement('canvas'); snapCtx = snapCanvas.getContext('2d'); }
+                const w = videoFrame.displayWidth || videoFrame.codedWidth || 1;
+                const h = videoFrame.displayHeight || videoFrame.codedHeight || 1;
+                if (snapCanvas.width !== w) snapCanvas.width = w;
+                if (snapCanvas.height !== h) snapCanvas.height = h;
+                snapCtx.drawImage(videoFrame, 0, 0, w, h);
+                const blob = await new Promise((resolve) => snapCanvas.toBlob(resolve, 'image/jpeg', 0.8));
+                if (blob && blob.size) {
+                    const bytes = new Uint8Array(await blob.arrayBuffer());
+                    if (bytes.length) {
+                        sendMedia(KIND.SNAP, performance.now(), bytes);
+                        log(`snapshot sent (${w}x${h}, ${bytes.length} bytes)`);
+                    }
+                }
+            } catch (err) { log('snapshot failed:', err.message); }
+            snapshotPending = false;
+        }
         if (!videoEncoder || videoEncoder.state !== 'configured') { videoFrame.close(); continue; }
         if (videoEncoder.encodeQueueSize > 2) { videoFrame.close(); continue; }
         if (videoFrame.displayWidth !== config.width || videoFrame.displayHeight !== config.height) {
@@ -434,6 +458,7 @@ function connect() {
             if (msg.mouse && msg.mouse.click) applyClick(msg.mouse);
             else if (msg.mouse) applyMouse(msg.mouse);
         } else if (msg.t === 'keyframe') wantKeyframe = true;
+        else if (msg.t === 'snapshot') snapshotPending = true;
         else if (msg.t === 'reload') { log('relay asked for a reload (video stalled)'); location.reload(); }
     };
     ws.onclose = () => {

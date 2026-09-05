@@ -55,6 +55,7 @@ const { WebSocketServer } = require('ws');
 const PORT         = Number(process.env.EMULATOR_PORT || 8090);
 const PUBLIC_DIR   = path.join(__dirname, 'public');
 const DATA_DIR     = path.join(__dirname, 'data');
+const SHOTS_DIR    = process.env.EMULATOR_SHOTS_DIR || path.join(DATA_DIR, 'shots');
 const DB_PATH      = process.env.EMULATOR_DB || path.join(DATA_DIR, 'emulatorshare.db');
 const HOST_TOKEN   = process.env.EMULATOR_HOST_TOKEN || '';
 const JWT_SECRET   = process.env.EMULATOR_JWT_SECRET || 'dev-secret-change-me';
@@ -84,6 +85,7 @@ const TICK_HZ         = 30;
 
 // ── SQLite ───────────────────────────────────────────────────────────────────
 fs.mkdirSync(DATA_DIR, { recursive: true });
+fs.mkdirSync(SHOTS_DIR, { recursive: true });
 fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
@@ -134,6 +136,8 @@ const qUpsertConsole  = db.prepare(`
 `);
 const qTouchConsole   = db.prepare('UPDATE consoles SET last_seen = ? WHERE key = ?');
 const qListConsoles   = db.prepare('SELECT * FROM consoles ORDER BY updated_at DESC');
+const qDeleteConsole  = db.prepare('DELETE FROM consoles WHERE key = ?');
+const qSetImage       = db.prepare('UPDATE consoles SET image = ?, updated_at = ? WHERE key = ?');
 
 // clean expired sessions occasionally
 setInterval(() => { try { qDeleteSession.run('', Date.now()); } catch {} }, 60 * 60 * 1000);
@@ -235,7 +239,7 @@ function makeConsoleState(key, name) {
 // [0] uint8  kind  2=video-key 3=video-delta 5=audio-chunk
 // [1..8]     f64   timestamp (microseconds)
 // [9..]      payload
-const KIND = { VCONF: 1, VKEY: 2, VDELTA: 3, ACONF: 4, ACHUNK: 5 };
+const KIND = { VCONF: 1, VKEY: 2, VDELTA: 3, ACONF: 4, ACHUNK: 5, SNAP: 6 };
 function mediaKind(buf) { return buf.length > 0 ? buf[0] : 0; }
 
 // ── Static file serving ─────────────────────────────────────────────────────
@@ -279,6 +283,21 @@ function serveStatic(req, res) {
             'Cache-Control': ['.js', '.mjs', '.json', '.html'].includes(ext)
                 ? 'no-cache, must-revalidate'
                 : 'public, max-age=3600',
+        }).end(data);
+    });
+}
+
+function serveShot(req, res, url) {
+    const key = path.basename(url).replace(/\.(jpg|jpeg|png|webp)$/i, '');
+    if (!key) return res.writeHead(404).end('Not found');
+    const file = path.join(SHOTS_DIR, `${key}.jpg`);
+    fs.readFile(file, (err, data) => {
+        if (err) { res.writeHead(404, { 'Content-Type': 'text/plain' }).end('Not found'); return; }
+        res.writeHead(200, {
+            'Content-Type': 'image/jpeg',
+            'Access-Control-Allow-Origin': '*',
+            'Cross-Origin-Resource-Policy': 'cross-origin',
+            'Cache-Control': 'no-cache, must-revalidate',
         }).end(data);
     });
 }
@@ -373,6 +392,7 @@ const server = http.createServer(async (req, res) => {
                 viewerCount: [...consoles.values()].reduce((n, c) => n + c.viewers.size, 0),
             });
         }
+        if (url.startsWith('/shots/')) return serveShot(req, res, url);
         return serveStatic(req, res);
     } catch (err) {
         console.error('[http] error:', err);
@@ -435,6 +455,10 @@ function attachHost(ws, consoleParam) {
             if (data.length > MAX_MEDIA_FRAME) return;
             const kind = mediaKind(data);
             const now = Date.now();
+            if (kind === KIND.SNAP) {
+                handleShot(cons, data.subarray(9));
+                return;
+            }
             if (kind === KIND.VKEY) { cons.lastKeyframe = Buffer.from(data); cons.stats.frames++; cons.lastVideoAt = now; }
             else if (kind === KIND.VDELTA) { cons.stats.frames++; cons.lastVideoAt = now; }
             cons.stats.bytes += data.length;
@@ -534,6 +558,50 @@ function requestKeyframe(cons) {
     cons.keyframeRequestedAt = now;
     logV(`keyframe: requesting keyframe from host "${cons.key}"`);
     sendHost(cons, { t: 'keyframe' });
+}
+
+// ── Snapshots ─────────────────────────────────────────────────────────────────
+// The host JPEG-encodes the current frame and pushes it to us as a SNAP frame
+// (kind 6). We park it under data/shots/<key>.jpg, expose it at /shots/<key>.jpg
+// and flip the console's image to that URL so the grid shows live thumbnails.
+function requestShot(cons) {
+    if (cons && cons.hostSock && cons.hostSock.readyState === 1) {
+        logV(`shot: requesting snapshot from host "${cons.key}"`);
+        sendHost(cons, { t: 'snapshot' });
+    }
+}
+
+function handleShot(cons, payload) {
+    if (!cons || !payload || !payload.length) return;
+    const safe = String(cons.key).replace(/[^a-zA-Z0-9._-]/g, '_');
+    const file = path.join(SHOTS_DIR, `${safe}.jpg`);
+    try {
+        fs.writeFileSync(file, payload);
+        const url = `/shots/${safe}.jpg`;
+        qSetImage.run(url, Date.now(), cons.key);
+        log(`shot: updated ${cons.key} thumbnail -> ${url} (${payload.length} bytes)`);
+    } catch (err) {
+        warn(`shot: failed to store ${file}: ${err.message}`);
+    }
+}
+
+// ── Console lifecycle ─────────────────────────────────────────────────────────
+// Drop every trace of a console that has gone away: live state (which detaches
+// its host socket + kicks its viewers) and its DB row.
+function removeConsole(cons) {
+    try { qDeleteConsole.run(cons.key); } catch {}
+    for (const v of cons.viewers.values()) {
+        cons.viewers.delete(v.id);
+        try { v.ws.close(4002, 'console-removed'); } catch {}
+    }
+    if (cons.hostSock) { try { cons.hostSock.close(4003, 'console-removed'); } catch {} }
+    cons.hostSock = null;
+    cons.hostAlive = false;
+    consoles.delete(cons.key);
+    try {
+        const shot = path.join(SHOTS_DIR, `${cons.key}.jpg`);
+        if (fs.existsSync(shot)) fs.unlinkSync(shot);
+    } catch {}
 }
 
 // ── Viewer side ─────────────────────────────────────────────────────────────
@@ -782,6 +850,36 @@ setInterval(() => {
         if (cons.vote) tallyVote(cons);
     }
 }, 2000);
+
+// ── Console pruning ───────────────────────────────────────────────────────────
+// Any console that has been DOWN (host disconnected / not registered) for more
+// than 2 minutes is removed entirely: kicked from live state, dropped from the
+// DB, and its thumbnail deleted. Consoles reappear automatically the moment a
+// host re-registers, so this only keeps the grid from piling up with dead rows.
+const PRUNE_AFTER_MS = 2 * 60 * 1000;
+
+setInterval(() => {
+    const now = Date.now();
+    for (const row of qListConsoles.all()) {
+        const live = consoles.get(row.key);
+        if (live && live.hostAlive) continue; // still up — skip
+        const lastSeen = row.last_seen || row.updated_at || 0;
+        if (!lastSeen || now - lastSeen < PRUNE_AFTER_MS) continue;
+        const downForMin = Math.round((now - lastSeen) / 60000);
+        log(`prune: console "${row.key}" down for ${downForMin} min — removing`);
+        if (live) removeConsole(live);
+        else try { qDeleteConsole.run(row.key); } catch {}
+    }
+}, 30000);
+
+// ── Thumbnail refresh ─────────────────────────────────────────────────────────
+// Every 5 minutes, ask every live host to JPEG-encode its current frame; handleShot
+// stores it and flips the console's image URL to the new snapshot.
+setInterval(() => {
+    for (const cons of consoles.values()) {
+        if (cons.hostAlive) requestShot(cons);
+    }
+}, 5 * 60 * 1000);
 
 setInterval(() => {
     for (const cons of consoles.values()) {
