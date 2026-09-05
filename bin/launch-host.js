@@ -62,6 +62,7 @@ const name      = arg('--name', '', 'EMULATOR_META_NAME');
 const image     = arg('--image', '', 'EMULATOR_META_IMAGE');
 const category  = arg('--category', '', 'EMULATOR_META_CATEGORY');
 const description = arg('--desc', '', 'EMULATOR_META_DESC');
+const motd       = arg('--motd', '', 'EMULATOR_META_MOTD');
 const w         = Number(arg('--w', process.env.EMULATOR_W || '480', 'EMULATOR_W'));
 const h         = Number(arg('--h', process.env.EMULATOR_H || '270', 'EMULATOR_H'));
 const fps       = Number(arg('--fps', process.env.EMULATOR_FPS || '30', 'EMULATOR_FPS'));
@@ -83,6 +84,7 @@ Options:
   --dir       <path>           Local console folder (default: consoles/<key>)
   --name | --image | --category | --desc
                               Console metadata shown in the viewer grid
+  --motd                    Message the console posts to chat when someone joins
   --w --h --fps --bitrate    Pixel size / frame rate / bitrate of the stream
   --port                      Local static-server port (default 8091)
   --profile                   Chromium profile dir (holds saves)
@@ -271,6 +273,7 @@ async function main() {
         `&image=${encodeURIComponent(image)}` +
         `&category=${encodeURIComponent(category)}` +
         `&desc=${encodeURIComponent(description)}` +
+        `&motd=${encodeURIComponent(motd)}` +
         `&fps=${fps}&bitrate=${bitrate}&w=${w}&h=${h}`;
 
     // GL backend: pick one that works in THIS environment. On Windows use ANGLE +
