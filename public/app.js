@@ -453,19 +453,16 @@ function openRulesModal() {
     document.getElementById('rulesModal').classList.remove('hidden')
 }
 
-// ── Tutorials (one-time, per user) ───────────────────────────────────────────
 const TUTORIALS = {
     home: [
-        { title: 'Welcome to emulatorSHARE', body: 'Every card on this screen is a real console running on a friend\u2019s machine, streamed live into your browser. No downloads, no ROMs — just click a console and play.' },
-        { title: 'Pick a console', body: 'Click any card to open it. The picture on each card is the console\u2019s current screen — a fresh snapshot taken every 5 minutes while it\u2019s online.' },
-        { title: 'Play together', body: 'Everyone in a console shares the same controller. Inputs are either merged (anarchy mode) or majority-voted (democracy mode), and the chat lets you coordinate with the crowd.' },
-        { title: 'What stays on the grid', body: 'A console is removed automatically after it\u2019s been offline for more than 2 minutes, so you only ever see machines you can actually join.' },
-        { title: 'Don\u2019t be a jerk', body: 'Read the Rules button up top: no harassment, no NSFW, don\u2019t delete save files. Pick a console and have fun!' },
+        { title: 'Welcome to emulatorSHARE', body: 'emulatorSHARE lets you play game consoles with strangers on the internet. Every card is a real emulator being hosted right now, streamed live into your browser.' },
+        { title: 'Pick a console', body: 'Click any card to open it. The thumbnail on each card is a live snapshot of that console\'s screen, refreshed every 5 minutes while it\'s online.' },
+        { title: 'Be cool', body: 'Please check and follow the rules at the top of the page: no harassment, no NSFW content, no toxicity, no breaking anything. Just pick a console and have fun.' },
     ],
     console: [
-        { title: 'You\u2019re in!', body: 'This is the console\u2019s live screen — what you see is happening right now on the host machine and streaming to you in real time.' },
-        { title: 'Everyone shares the controls', body: 'Your keyboard and mouse are wired straight into the same controller everyone else uses. In anarchy mode every input counts; in democracy only the crowd\u2019s majority keys get through.' },
-        { title: 'Talk and play', body: 'Use chat to coordinate with the other players, and watch the player list to see who\u2019s in the room. That\u2019s everything — jump in!' },
+        { title: 'You\'re in!', body: 'This is the console\'s live screen, streaming in real time from the host machine. What you see is happening right now.' },
+        { title: 'Everyone shares the controls', body: 'Your keyboard and mouse feed into the same controller as everyone else.' },
+        { title: 'Talk and coordinate', body: 'Use the chat to organize with other players and check the player list to see who\'s in the room. Now jump in!' },
     ],
 };
 
