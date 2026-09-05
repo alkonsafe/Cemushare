@@ -604,7 +604,7 @@ function connectStreamWs(consoleName) {
     };
 
     streamWs.onclose = () => {
-        setStreamStatus('disconnected — retrying…');
+        setStreamStatus('disconnected - retrying…');
         waitingForKeyframe = true;
         if (currentConsoleName) {
             setTimeout(() => {
@@ -640,7 +640,7 @@ function handleStreamMessage(msg) {
             configureAudio(msg.config);
             break;
         case 'host':
-            setStreamStatus(msg.up ? '' : 'console went down — it will come back');
+            setStreamStatus(msg.up ? '' : 'console went down - it will come back');
             if (msg.up) waitingForKeyframe = true;
             break;
         case 'roster':
@@ -776,7 +776,7 @@ async function configureVideo(config) {
     __decoderErrorFn = (e) => {
         console.error('[decoder ERROR]', e);
         waitingForKeyframe = true;
-        setStreamStatus('decode error — waiting for keyframe');
+        setStreamStatus('decode error - waiting for keyframe');
         if (decoderConfig) {
             try { videoDecoder.configure(decoderConfig); } catch {}
         }
@@ -809,7 +809,7 @@ function ensureAvcDescription() {
     if (!sps || !pps) { console.warn('[decoder] keyframe had no SPS/PPS'); return false; }
     decoderConfig.description = buildAvcDescription(sps, pps);
     needAvcDescription = false;
-    console.log('[decoder] built avcC description from keyframe (' + sps.length + '/' + pps.length + ' bytes) — reconfiguring');
+    console.log('[decoder] built avcC description from keyframe (' + sps.length + '/' + pps.length + ' bytes) - reconfiguring');
     console.log('[decoder] SPS[0..3]=', Array.from(sps.slice(0, 4)), ' PPS=', Array.from(pps));
     try { if (videoDecoder && videoDecoder.state !== 'closed') videoDecoder.close(); } catch {}
     try { videoDecoder = new VideoDecoder({ output: __decoderOutputFn, error: __decoderErrorFn }); videoDecoder.configure(decoderConfig); } catch (e) { console.error('[decoder] reconfigure failed', e); return false; }
@@ -839,7 +839,7 @@ function decodeVideo(kind, timestamp, payload) {
     // to the latest frame immediately instead of freezing on the last decoded
     // frame until the next natural keyframe (up to 2s at 30fps).
     if (q > MAX_DECODE_QUEUE) {
-        // Decoder is overwhelmed — reset drops ALL queued work (old frames)
+        // Decoder is overwhelmed - reset drops ALL queued work (old frames)
         // instantly so we resync on the incoming keyframe instead of decoding
         // 8+ stale frames behind it. Reset clears the codec state, so we must
         // wait for a fresh keyframe afterward.
@@ -850,7 +850,7 @@ function decodeVideo(kind, timestamp, payload) {
         return;
     }
     if (q > 4 && !isKey) {
-        // Moderate load — skip deltas to keep latency low.
+        // Moderate load - skip deltas to keep latency low.
         requestKeyframe();
         return;
     }
@@ -899,7 +899,7 @@ function scheduleNoOutputCheck() {
     setTimeout(() => {
         __noOutputArmed = false;
         if (videoDecoder && (window.__dbgOutput || 0) === 0) {
-            console.warn('[decoder] WATCHDOG: keyframes decoded but no output — reconfiguring');
+            console.warn('[decoder] WATCHDOG: keyframes decoded but no output - reconfiguring');
             waitingForKeyframe = true;
             if (decoderConfig) {
                 try { videoDecoder.configure(decoderConfig); } catch {}
@@ -1001,7 +1001,7 @@ function annexBNals(payload) {
 
 // Build an avcC "description" blob from SPS + PPS NALs so the browser's avc1
 // VideoDecoder can be configured with it (needed when the host's keyframes carry
-// SPS/PPS inline but the encoder never emitted a decoderConfig description —
+// SPS/PPS inline but the encoder never emitted a decoderConfig description -
 // which is exactly what Edge does for avc1).
 function buildAvcDescription(sps, pps) {
     const out = [];
@@ -1160,9 +1160,9 @@ function sendStreamInput(msg) {
             flushInput(msg);
             return;
         }
-        // Too soon after the previous send (rapid mousemove storm) — drop.
+        // Too soon after the previous send (rapid mousemove storm) - drop.
         if (now - _lastMouseAt < _MOUSE_MIN_GAP_MS) return;
-        // Identical position to what we already sent — nothing new, drop it.
+        // Identical position to what we already sent - nothing new, drop it.
         // This is the key guard against a "replays same input" feedback loop.
         if (_lastMouseSent && _lastMouseSent.x === m.x && _lastMouseSent.y === m.y) {
             return;
@@ -1184,7 +1184,7 @@ function flushInput(msg) {
     }));
 }
 
-// Global keyboard forwarding — track a held-key set so releases actually reach
+// Global keyboard forwarding - track a held-key set so releases actually reach
 // the server (a single [code] on keydown with no keyup would leave buttons
 // stuck down forever and pin the game for everyone).
 const heldInputKeys = new Set();
