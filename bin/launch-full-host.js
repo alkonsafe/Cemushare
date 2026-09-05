@@ -90,6 +90,7 @@ const bitrate    = Number(arg('--bitrate', process.env.EMULATOR_BITRATE || '1800
 const display    = Number(arg('--display', '99', 'EMULATOR_DISPLAY'));
 const resX       = Number(arg('--resx', String(w), 'EMULATOR_RES_X'));
 const resY       = Number(arg('--resy', String(h), 'EMULATOR_RES_Y'));
+const videoCapturePath = arg('--vcapture', '', 'EMULATOR_VCAPTURE');
 
 function usage() {
     console.log(`
@@ -109,6 +110,7 @@ Options:
   --resx --resy              Virtual display resolution (default = --w x --h)
   --w --h --fps --bitrate    Pixel size / frame rate / bitrate of the stream
   --display   <N>            Xvfb display number (default 99)
+  --vcapture  <file>         Tee exact raw video bytes (IVF) to a file for offline repro
   --check                   Verify required binaries + games.json and exit
 
 Example:
@@ -301,6 +303,26 @@ function sendMedia(kind, time, payload) {
 }
 
 // -- IVF reader (video) -------------------------------------------------------
+// Optional --vcapture <file>: tee raw ffmpeg stdout (exact IVF bytes the relay
+// sees) to a file so a bad frame can be replayed offline through the repro.
+const vcap = (() => {
+    const fs = require('fs');
+    const { Transform } = require('stream');
+    if (!videoCapturePath) return null;
+    const dest = fs.createWriteStream(videoCapturePath);
+    dest.on('error', () => {});
+    const t = new Transform({
+        transform(chunk, enc, cb) {
+            dest.write(chunk);
+            cb(null, chunk);
+        },
+    });
+    return t;
+})();
+function handleVideoChunk(d) {
+    parseIvf(d);
+    if (vcap) vcap.write(d);
+}
 function parseIvf(chunk) {
     // Keeps a growing buffer; pulls IVF frames out as they complete.
     parseIvf.buf = Buffer.concat([parseIvf.buf || Buffer.alloc(0), chunk]);
@@ -387,7 +409,7 @@ function spawnVideo() {
     videoProc.stdout.on('data', handleVideoChunk);
     videoProc.stderr.on('data', (d) => process.stderr.write('[video ffmpeg] ' + d));
     videoProc.on('exit', (code) => { if (wsReady) console.log(`[full] video ffmpeg exited (${code})`); });
-    console.log(`[full] video capture up (pid=${videoProc.pid}, ${w}x${h}@${fps} → libvpx/vp8 → IVF)`);
+    console.log(`[full] video capture up (pid=${videoProc.pid}, ${w}x${h}@${fps} → libvpx/vp8 → IVF)${vcap ? ` — tee→${videoCapturePath}` : ''}`);
 }
 function spawnAudio() {
     const audioArgs = [
