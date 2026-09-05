@@ -637,7 +637,7 @@ function attachViewer(ws, consoleParam, user) {
     cons.viewers.set(v.id, v);
     log(`viewer "${v.username}" (${v.id}) joined console "${cons.key}" (${cons.viewers.size} online)`);
 
-    const motdText = (cons.motd || '').replace(/\$user/gi, v.username);
+    const motdText = (cons.motd || '').replace(/\$user|\{user\}/gi, v.username);
     if (motdText && motdText.trim()) {
         log(`motd: ${cons.key} -> chat <Console> ${motdText}`);
         broadcastJson(cons, { t: 'chat', from: 'Console', text: motdText, userId: null, motd: true });
