@@ -1266,7 +1266,7 @@ function addChatMessage(username, message, isServer = false, isSelf = false, pfp
             
             <span class="text-black dark:text-white text-xs">▶</span>
             
-            <span class="text-gray-900 dark:text-gray-100 text-sm flex-1 break-words max-w-[70%] lg:max-w-[400px]">
+            <span class="text-gray-900 dark:text-gray-100 text-sm flex-1 break-words whitespace-pre-wrap max-w-[70%] lg:max-w-[400px]">
                 ${escapeHtml(message)}
             </span>
         </div>

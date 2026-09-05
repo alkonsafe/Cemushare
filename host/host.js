@@ -27,7 +27,7 @@ const TOKEN    = params.get('token') || '';
 const CONSOLE  = params.get('console') || '';
 const META     = { name: params.get('name') || CONSOLE, image: params.get('image') || null,
                    category: params.get('category') || null, description: params.get('desc') || null,
-                   motd: params.get('motd') || null };
+                   motd: (params.get('motd') || '').replace(/\\n/gi, '\n').replace(/\\t/gi, '\t') || null };
 const FPS      = Number(params.get('fps') || 30);
 const BITRATE  = Number(params.get('bitrate') || 1_800_000);
 const RENDER_W = Number(params.get('w') || 480);
