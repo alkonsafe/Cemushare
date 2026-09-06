@@ -456,8 +456,11 @@ function connect() {
         let msg; try { msg = JSON.parse(ev.data); } catch { return; }
         if (msg.t === 'input') {
             applyInput(Array.isArray(msg.keys) ? msg.keys : []);
-            if (msg.mouse && msg.mouse.click) applyClick(msg.mouse);
-            else if (msg.mouse) applyMouse(msg.mouse);
+            // Relative (camera-delta) mouse is a full-host concept; the legacy
+            // Chromium host dispatches absolute canvas events, so ignore rel.
+            if (!msg.mouse || msg.mouse.rel) return;
+            if (msg.mouse.click) applyClick(msg.mouse);
+            else applyMouse(msg.mouse);
         } else if (msg.t === 'keyframe') wantKeyframe = true;
         else if (msg.t === 'snapshot') snapshotPending = true;
         else if (msg.t === 'reload') { log('relay asked for a reload (video stalled)'); location.reload(); }

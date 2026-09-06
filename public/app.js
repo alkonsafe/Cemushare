@@ -1393,6 +1393,45 @@ function unlockAudio() {
 // is cleared on mouseup/leave so the next press can click again.
 const _heldButtons = new Set();
 
+// ── Pointer-lock camera mode ────────────────────────────────────────────────
+// Backtick (`) toggles "camera" mode: the cursor is hidden and pointer-locked
+// (invisible and recentered by the browser), and only mouse *deltas*
+// (movementX/Y) are forwarded as relative motion. Games like Minecraft need
+// this for proper camera look; absolute cursor coordinates are useless there.
+let cameraActive = false;
+
+function toggleCameraMode() {
+    if (cameraActive) exitCameraMode(); else enterCameraMode();
+}
+function enterCameraMode() {
+    const canvas = getStreamCanvas();
+    if (!canvas || cameraActive) return;
+    cameraActive = true;
+    if (canvas.style) canvas.style.cursor = 'none';
+    try {
+        const p = canvas.requestPointerLock && canvas.requestPointerLock();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+    } catch { }
+    updateCameraBadge();
+}
+function exitCameraMode() {
+    if (!cameraActive) return;
+    cameraActive = false;
+    const canvas = getStreamCanvas();
+    if (canvas && canvas.style) canvas.style.cursor = '';
+    if (document.pointerLockElement) { try { document.exitPointerLock(); } catch { } }
+    updateCameraBadge();
+}
+function updateCameraBadge() {
+    const b = document.getElementById('cameraBadge');
+    if (b) b.classList.toggle('hidden', !cameraActive);
+}
+// Pointer lock dropping out (Esc, switching tabs/minimizing) ends camera mode
+// so the now-visible cursor lines back up with normal absolute mouse handling.
+document.addEventListener('pointerlockchange', () => {
+    if (cameraActive && !document.pointerLockElement) exitCameraMode();
+});
+
 function setupStreamInput() {
     const canvas = getStreamCanvas();
     if (!canvas) return;
@@ -1406,6 +1445,10 @@ function setupStreamInput() {
     };
 
     canvas.addEventListener('mousemove', (e) => {
+        if (cameraActive) {
+            sendStreamInput({ mouse: { dx: e.movementX || 0, dy: e.movementY || 0, rel: true } });
+            return;
+        }
         const p = pos(e, canvas);
         sendStreamInput({ mouse: { x: p.x, y: p.y } });
     });
@@ -1414,12 +1457,20 @@ function setupStreamInput() {
         const btn = e.button + 1;
         if (_heldButtons.has(btn)) return;   // already holding → no re-click
         _heldButtons.add(btn);
+        if (cameraActive) {
+            sendStreamInput({ mouse: { dx: 0, dy: 0, rel: true, click: true, button: btn } });
+            return;
+        }
         const p = pos(e, canvas);
         sendStreamInput({ mouse: { x: p.x, y: p.y, click: true, button: btn } });
     });
     canvas.addEventListener('mouseup', (e) => {
         const btn = e.button + 1;
         _heldButtons.delete(btn);
+        if (cameraActive) {
+            sendStreamInput({ mouse: { dx: 0, dy: 0, rel: true } });
+            return;
+        }
         const p = pos(e, canvas);
         sendStreamInput({ mouse: { x: p.x, y: p.y } });   // release: stop any hold
     });
@@ -1454,6 +1505,16 @@ function sendStreamInput(msg) {
         }
         // Too soon after the previous send (rapid mousemove storm) - drop.
         if (now - _lastMouseAt < _MOUSE_MIN_GAP_MS) return;
+        if (m.rel) {
+            // Camera mode: forward deltas, skip identical (zero-move) repeats.
+            if (_lastMouseSent && _lastMouseSent.rel && _lastMouseSent.dx === m.dx && _lastMouseSent.dy === m.dy) {
+                return;
+            }
+            _lastMouseAt = now;
+            _lastMouseSent = { dx: m.dx, dy: m.dy, rel: true };
+            flushInput({ mouse: { dx: m.dx, dy: m.dy, rel: true } });
+            return;
+        }
         // Identical position to what we already sent - nothing new, drop it.
         // This is the key guard against a "replays same input" feedback loop.
         if (_lastMouseSent && _lastMouseSent.x === m.x && _lastMouseSent.y === m.y) {
@@ -1741,6 +1802,11 @@ window.addEventListener('keydown', (e) => {
         return;
     }
     if (e.metaKey || e.ctrlKey || e.altKey) return;   // browser/OS combos stay local
+    if (e.code === 'Backquote') {
+        e.preventDefault();
+        if (!e.repeat) toggleCameraMode();
+        return;
+    }
     const code = keyRemap.get(e.code) || e.code;
     if (NON_FORWARDABLE.has(code)) return;
     e.preventDefault();
@@ -1754,6 +1820,7 @@ window.addEventListener('keyup', (e) => {
         return;
     }
     if (e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.code === 'Backquote') { e.preventDefault(); return; }
     const code = keyRemap.get(e.code) || e.code;
     if (NON_FORWARDABLE.has(code)) return;
     e.preventDefault();

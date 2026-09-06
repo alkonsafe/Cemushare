@@ -682,9 +682,20 @@ function applyInput(keys, mouse) {
         if (!heldKeys.has(t)) { fireXdotool(['keydown', t]); heldKeys.add(t); }
     }
     if (mouse) {
+        const dispW = resX || w, dispH = resY || h;
+        if (mouse.rel) {
+            // Camera-delta mode: relative movement, no absolute re-position.
+            const dx = Math.round(mouse.dx || 0), dy = Math.round(mouse.dy || 0);
+            if (dx || dy) fireXdotool(['mousemove_relative', String(dx), String(dy)]);
+            if (mouse.click) {
+                const btn = String(mouse.button || 1);
+                fireXdotool(['mousedown', btn]);
+                fireXdotool(['mouseup', btn], 60);
+            }
+            return;
+        }
         // Viewer coords are in stream pixel space (0..w, 0..h). If the virtual
         // display is bigger than the captured region, scale into display space.
-        const dispW = resX || w, dispH = resY || h;
         const x = Math.max(0, Math.min(dispW - 1, Math.round(mouse.x * dispW / w)));
         const y = Math.max(0, Math.min(dispH - 1, Math.round(mouse.y * dispH / h)));
         fireXdotool(['mousemove', String(x), String(y)]);
