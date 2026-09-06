@@ -685,8 +685,10 @@ function applyInput(keys, mouse) {
         const dispW = resX || w, dispH = resY || h;
         if (mouse.rel) {
             // Camera-delta mode: relative movement, no absolute re-position.
+            // The `--` is mandatory: a negative dx/dy (left/up) otherwise gets
+            // parsed by xdotool as an option and the move is dropped.
             const dx = Math.round(mouse.dx || 0), dy = Math.round(mouse.dy || 0);
-            if (dx || dy) fireXdotool(['mousemove_relative', String(dx), String(dy)]);
+            if (dx || dy) fireXdotool(['mousemove_relative', '--', String(dx), String(dy)]);
             if (mouse.click) {
                 const btn = String(mouse.button || 1);
                 fireXdotool(['mousedown', btn]);
