@@ -1028,7 +1028,12 @@ function openGameVote(cons, v, game) {
     if (!game || !cons.games.some((g) => g.key === game)) return;   // not an offered game
     if (cons.gameVote) return;                                      // a game vote is running
     if (game === cons.currentGame) { send(v, { t: 'notice', text: 'that game is already running' }); return; }
-    if (now < cons.gameVoteCooldownUntil) { send(v, { t: 'notice', text: 'a game vote just finished — give it a few seconds' }); return; }
+    if (cons.viewers.size > 1 && now < cons.gameVoteCooldownUntil) {
+        const remaining = Math.ceil((cons.gameVoteCooldownUntil - now) / 1000);
+        log(`gamevote: "${cons.key}" switching blocked by cooldown (${remaining}s) after ${v.username} proposed "${game}"`);
+        broadcastJson(cons, { t: 'chat', from: 'Console', text: `Switching is on cooldown! ${remaining}s remain` });
+        return;
+    }
     cons.gameVote = { game, byName: v.username, byId: v.id, yes: new Set([v.id]), no: new Set(), endsAt: now + VOTE_MS };
     broadcastJson(cons, gameVoteSnapshot(cons));
     tallyGameVote(cons);
