@@ -1048,7 +1048,13 @@ function tallyGameVote(cons) {
     if (!gv) return;
     const need = votesNeeded(cons);
     const expired = Date.now() >= gv.endsAt;
-    const passed = gv.yes.size >= need || (expired && gv.yes.size > gv.no.size);
+    let passed = gv.yes.size >= need || (expired && gv.yes.size > gv.no.size);
+    // A timeout-only pass where the proposer is the sole "yes" while other
+    // viewers are in the room: nobody else confirmed, so don't launch.
+    if (expired && gv.yes.size === 1 && cons.viewers.size > 1) {
+        passed = false;
+        log(`gamevote: "${cons.key}" sole yes from ${gv.byName}, ${cons.viewers.size} viewers in room; not launching "${gv.game}"`);
+    }
     if (!passed && !expired) return;
     const won = gv.game, by = gv.byName;
     cons.gameVote = null;
