@@ -4,6 +4,7 @@
 // here is a fake Node socket speaking the same framing the real headless
 // Chromium host sends, so the relay path is exercised without WebCodecs.
 const http = require('http');
+const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 const WebSocket = require('ws');
@@ -11,6 +12,10 @@ const WebSocket = require('ws');
 const PORT = Number(process.env.EMULATOR_PORT || 8097);
 const HOST_TOKEN = 'test-host-token-000000000000';
 const DB = path.join(__dirname, 'data', 'protocol-test.db');
+
+// Start from a clean slate: a leftover DB from a previous run (e.g. "bob"
+// registered with a different password) makes login fail spuriously.
+fs.rmSync(path.join(__dirname, 'data'), { recursive: true, force: true });
 
 const child = spawn(process.execPath, ['server.js'], {
     env: { ...process.env, EMULATOR_PORT: String(PORT), EMULATOR_DB: DB,

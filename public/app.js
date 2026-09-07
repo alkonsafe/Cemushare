@@ -284,7 +284,10 @@ function renderConsoles(consoles) {
         card.addEventListener('click', (e) => {
             e.preventDefault()
             e.stopPropagation()
-            openConsoleViewer(p.name)
+            // Join by the console's stable key, not its display name: the relay
+            // resolves the /stream console param by key first, and two consoles
+            // can share a name (or a host can rename one mid-session).
+            openConsoleViewer(p.key || p.name)
         })
         grid.appendChild(card)
         setTimeout(() => {

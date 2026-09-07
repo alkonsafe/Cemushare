@@ -87,6 +87,40 @@ const CHAT_MAX_LEN    = 500;
 const INPUT_STALE_MS  = 3000;
 const TICK_HZ         = 30;
 
+// ── Auth rate limiting ───────────────────────────────────────────────────────
+// Password checks use scryptSync, which blocks the event loop (~50-100ms per
+// attempt). Unauthenticated POST spam against /api/login or /api/register can
+// therefore stall the relay — and every stream riding on it — with no
+// credentials at all. Tiny in-memory fixed-window limiter keyed by IP+route;
+// no dependencies. (It is deliberately strict: auth is a rare action.)
+const AUTH_LIMITS = {
+    '/api/login':    { max: 10, windowMs: 60 * 1000 },
+    '/api/register': { max: 10, windowMs: 60 * 1000 },
+    '/api/discord/auth': { max: 15, windowMs: 60 * 1000 },
+};
+const authHits = new Map(); // "route|ip" -> { count, resetAt }
+function authRateLimited(req, route) {
+    const limit = AUTH_LIMITS[route];
+    if (!limit) return false;
+    const ip = (req.socket && req.socket.remoteAddress) || 'unknown';
+    const key = `${route}|${ip}`;
+    const now = Date.now();
+    let entry = authHits.get(key);
+    if (!entry || now >= entry.resetAt) {
+        entry = { count: 0, resetAt: now + limit.windowMs };
+        authHits.set(key, entry);
+        if (authHits.size > 10000) { // opportunistically GC dead windows
+            for (const [k, v] of authHits) if (now >= v.resetAt) authHits.delete(k);
+        }
+    }
+    entry.count++;
+    if (entry.count > limit.max) {
+        warn(`ratelimit: ${route} throttled for ${ip} (${entry.count} in window)`);
+        return true;
+    }
+    return false;
+}
+
 // ── SQLite ───────────────────────────────────────────────────────────────────
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(SHOTS_DIR, { recursive: true });
@@ -133,7 +167,7 @@ const qUserByDiscord  = db.prepare('SELECT * FROM users WHERE discord_id = ?');
 const qCreateUser     = db.prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?,?,?)');
 const qCreateDiscordUser = db.prepare('INSERT INTO users (username, password_hash, created_at, discord_id) VALUES (?,?,?,?)');
 const qInsertSession  = db.prepare('INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)');
-const qDeleteSession  = db.prepare('DELETE FROM sessions WHERE token = ? OR expires_at <= ?');
+const qDeleteSession  = db.prepare('DELETE FROM sessions WHERE expires_at <= ?');
 const qFindSession    = db.prepare('SELECT s.*, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?');
 
 const qUpsertConsole  = db.prepare(`
@@ -153,7 +187,7 @@ const qDeleteConsole  = db.prepare('DELETE FROM consoles WHERE key = ?');
 const qSetImage       = db.prepare('UPDATE consoles SET image = ?, updated_at = ? WHERE key = ?');
 
 // clean expired sessions occasionally
-setInterval(() => { try { qDeleteSession.run('', Date.now()); } catch {} }, 60 * 60 * 1000);
+setInterval(() => { try { qDeleteSession.run(Date.now()); } catch {} }, 60 * 60 * 1000);
 
 // ── Password hashing (scrypt) ────────────────────────────────────────────────
 function hashPassword(password) {
@@ -297,7 +331,15 @@ const MIME = {
 };
 
 function serveStatic(req, res) {
-    let url = decodeURIComponent((req.url || '/').split('?')[0]);
+    let url;
+    try {
+        url = decodeURIComponent((req.url || '/').split('?')[0]);
+    } catch {
+        // Malformed percent-encoding (e.g. "/%") used to throw and surface as a
+        // 500; it's just a bad request.
+        res.writeHead(400, { 'Content-Type': 'text/plain' }).end('Bad request');
+        return;
+    }
     if (url === '/' || url === '') url = '/index.html';
     const target = path.normalize(path.join(PUBLIC_DIR, url));
     if (target !== PUBLIC_DIR && !target.startsWith(PUBLIC_DIR + path.sep)) {
@@ -352,8 +394,8 @@ function readBody(req, cap = 32 * 1024) {
 }
 
 function consoleShotUrl(key) {
-    const safe = String(key).replace(/[^a-zA-Z0-9._-]/g, '_');
-    try { if (fs.existsSync(path.join(SHOTS_DIR, `${safe}.jpg`))) return `/shots/${safe}.jpg`; } catch {}
+    const file = shotFileFor(key);
+    try { if (fs.existsSync(file)) return `/shots/${path.basename(file)}`; } catch {}
     return null;
 }
 
@@ -373,6 +415,7 @@ function publicConsole(c) {
 // ── HTTP handlers ───────────────────────────────────────────────────────────
 async function handleRegister(req, res) {
     if (req.method !== 'POST') return json(res, 405, { message: 'method not allowed' });
+    if (authRateLimited(req, '/api/register')) return json(res, 429, { message: 'you are a birdvirus rate limiter' });
     let body; try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { message: 'bad request' }); }
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
@@ -389,6 +432,7 @@ async function handleRegister(req, res) {
 
 async function handleLogin(req, res) {
     if (req.method !== 'POST') return json(res, 405, { message: 'method not allowed' });
+    if (authRateLimited(req, '/api/login')) return json(res, 429, { message: 'you are a birdvirus rate limiter' });
     let body; try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { message: 'bad request' }); }
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
@@ -457,6 +501,7 @@ function makeUniqueUsername(base, discordId) {
 
 async function handleDiscordAuth(req, res) {
     if (req.method !== 'POST') return json(res, 405, { message: 'method not allowed' });
+    if (authRateLimited(req, '/api/discord/auth')) return json(res, 429, { message: 'you are a birdvirus rate limiter' });
     if (!DISCORD_CLIENT_ID || !DISCORD_CLIENT_SECRET)
         return json(res, 503, { message: 'discord auth not configured on server' });
     let body; try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { message: 'bad request' }); }
@@ -465,18 +510,9 @@ async function handleDiscordAuth(req, res) {
     const redirectUri = DISCORD_REDIRECT_URI;
 
     let exchange;
-    console.log('TOKEN EXCHANGE REQUEST', {
-        url: 'https://discord.com/api/oauth2/token',
-        body: new URLSearchParams({
-            client_id: DISCORD_CLIENT_ID,
-            client_secret: DISCORD_CLIENT_SECRET,
-            grant_type: 'authorization_code',
-            code,
-            redirect_uri: redirectUri,
-        }).toString(),
-        redirectUri,
-        clientId: DISCORD_CLIENT_ID,
-    });
+    // NOTE: never log the request body here — it contains DISCORD_CLIENT_SECRET
+    // — nor the response body, which contains live access/refresh tokens.
+    logV(`discord: exchanging code at discord.com/api/oauth2/token (code=${shortLog(code, 6)}…)`);
     try {
         exchange = await httpsJSON('POST', 'discord.com', '/api/oauth2/token', {
             'Content-Type': 'application/x-www-form-urlencoded',
@@ -492,11 +528,7 @@ async function handleDiscordAuth(req, res) {
         warn(`discord: token exchange failed: ${e.message}`);
         return json(res, 502, { message: `discord token exchange failed: ${e.message}` });
     }
-    console.log('TOKEN EXCHANGE RESPONSE', {
-        status: exchange.status,
-        json: exchange.json,
-        textHead: shortLog(exchange.text, 300),
-    });
+    logV(`discord: token exchange response status=${exchange.status}`);
     const accessToken = exchange.json && exchange.json.access_token;
     if (!accessToken) {
         const dErr = exchange.json && (exchange.json.error || exchange.json.error_description);
@@ -506,10 +538,7 @@ async function handleDiscordAuth(req, res) {
     }
 
     let me;
-    console.log('DISCORD IDENTIFY REQUEST', {
-        url: 'https://discord.com/api/users/@me',
-        authHeader: `Bearer ${accessToken.slice(0, 8)}...`,
-    });
+    logV('discord: calling discord.com/api/users/@me');
     try {
         me = await httpsJSON('GET', 'discord.com', '/api/users/@me',
             { 'Authorization': `Bearer ${accessToken}`, 'Accept': 'application/json' });
@@ -517,11 +546,7 @@ async function handleDiscordAuth(req, res) {
         warn(`discord: identify failed: ${e.message}`);
         return json(res, 502, { message: 'discord identify failed' });
     }
-    console.log('DISCORD IDENTIFY RESPONSE', {
-        status: me.status,
-        json: me.json,
-        textHead: shortLog(me.text, 300),
-    });
+    logV(`discord: identify response status=${me.status}`);
     const discordUser = me.json;
     if (!discordUser || discordUser.error || !discordUser.id || !discordUser.username) {
         warn(`discord: identify rejected (${me.status}) ${shortLog(me.text)}`);
@@ -764,6 +789,12 @@ function hardKeyframe(cons) {
 // The host JPEG-encodes the current frame and pushes it to us as a SNAP frame
 // (kind 6). We park it under data/shots/<key>.jpg, expose it at /shots/<key>.jpg
 // and flip the console's image to that URL so the grid shows live thumbnails.
+// Console keys are host-supplied and only loosely constrained, so EVERY path
+// into SHOTS_DIR must go through the same sanitizing helper.
+function shotFileFor(key) {
+    const safe = String(key).replace(/[^a-zA-Z0-9._-]/g, '_');
+    return path.join(SHOTS_DIR, `${safe}.jpg`);
+}
 function requestShot(cons) {
     if (cons && cons.hostSock && cons.hostSock.readyState === 1) {
         logV(`shot: requesting snapshot from host "${cons.key}"`);
@@ -773,11 +804,10 @@ function requestShot(cons) {
 
 function handleShot(cons, payload) {
     if (!cons || !payload || !payload.length) return;
-    const safe = String(cons.key).replace(/[^a-zA-Z0-9._-]/g, '_');
-    const file = path.join(SHOTS_DIR, `${safe}.jpg`);
+    const file = shotFileFor(cons.key);
     try {
         fs.writeFileSync(file, payload);
-        const url = `/shots/${safe}.jpg`;
+        const url = `/shots/${path.basename(file)}`;
         qSetImage.run(url, Date.now(), cons.key);
         log(`shot: updated ${cons.key} thumbnail -> ${url} (${payload.length} bytes)`);
     } catch (err) {
@@ -799,7 +829,7 @@ function removeConsole(cons) {
     cons.hostAlive = false;
     consoles.delete(cons.key);
     try {
-        const shot = path.join(SHOTS_DIR, `${cons.key}.jpg`);
+        const shot = shotFileFor(cons.key);
         if (fs.existsSync(shot)) fs.unlinkSync(shot);
     } catch {}
 }

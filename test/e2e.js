@@ -4,12 +4,16 @@
 // real encoded video/audio from the demo console. Requires Edge/Chrome.
 const { spawn } = require('child_process');
 const http = require('http');
+const fs = require('fs');
 const path = require('path');
 const WebSocket = require('ws');
 
 const ROOT = path.resolve(__dirname, '..');
 const PORT = 8093, HOST_TOKEN = 'e2ehosttoken123456';
 const sleep = (m) => new Promise((r) => setTimeout(r, m));
+
+// Fresh DB per run so re-runs don't collide with leftover state.
+fs.rmSync(path.join(__dirname, 'data'), { recursive: true, force: true });
 
 function hj(m, u) {
     return new Promise((res) => {
