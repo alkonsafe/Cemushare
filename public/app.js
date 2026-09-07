@@ -1419,6 +1419,9 @@ function exitCameraMode() {
     cameraActive = false;
     const canvas = getStreamCanvas();
     if (canvas && canvas.style) canvas.style.cursor = '';
+    // Release anything the camera mode was holding so it never stays stuck down.
+    for (const btn of _heldButtons) sendStreamInput({ mouse: { dx: 0, dy: 0, rel: true, held: false, button: btn } });
+    _heldButtons.clear();
     if (document.pointerLockElement) { try { document.exitPointerLock(); } catch { } }
     updateCameraBadge();
 }
@@ -1455,10 +1458,11 @@ function setupStreamInput() {
     canvas.addEventListener('mousedown', (e) => {
         unlockAudio();
         const btn = e.button + 1;
-        if (_heldButtons.has(btn)) return;   // already holding → no re-click
+        if (_heldButtons.has(btn)) return;   // already holding → no re-send
         _heldButtons.add(btn);
         if (cameraActive) {
-            sendStreamInput({ mouse: { dx: 0, dy: 0, rel: true, click: true, button: btn } });
+            // Camera (locked) mode: raw button hold, release on mouseup.
+            sendStreamInput({ mouse: { dx: 0, dy: 0, rel: true, held: true, button: btn } });
             return;
         }
         const p = pos(e, canvas);
@@ -1468,7 +1472,7 @@ function setupStreamInput() {
         const btn = e.button + 1;
         _heldButtons.delete(btn);
         if (cameraActive) {
-            sendStreamInput({ mouse: { dx: 0, dy: 0, rel: true } });
+            sendStreamInput({ mouse: { dx: 0, dy: 0, rel: true, held: false, button: btn } });
             return;
         }
         const p = pos(e, canvas);
@@ -1498,8 +1502,8 @@ function sendStreamInput(msg) {
     const m = msg.mouse || null;
     if (m) {
         const now = Date.now();
-        // Clicks must go through immediately.
-        if (m.click) {
+        // Clicks and button hold transitions must go through immediately.
+        if (m.click || m.held !== undefined) {
             flushInput(msg);
             return;
         }

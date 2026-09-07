@@ -890,6 +890,8 @@ function handleViewerMsg(cons, v, msg) {
             if (msg.mouse) {
                 if (msg.mouse.rel) {
                     v.mouse = { rel: true, dx: Math.round(+msg.mouse.dx || 0), dy: Math.round(+msg.mouse.dy || 0), click: !!msg.mouse.click, button: +msg.mouse.button || 0 };
+                    if (msg.mouse.held === true) v.mouse.held = true;
+                    else if (msg.mouse.held === false) v.mouse.held = false;
                 } else {
                     v.mouse = { x: +msg.mouse.x || 0, y: +msg.mouse.y || 0, click: !!msg.mouse.click, button: +msg.mouse.button || 0 };
                 }
@@ -1085,9 +1087,10 @@ function mergeAnarchy(cons, active) {
     for (const v of active) {
         for (const k of v.keys) out.add(k);
         const m = v.mouse;
-        // Clicks always forward; relative camera deltas forward as movement.
-        // Zero-delta camera reports carry no motion, so skip those.
-        if (m && (m.click || (m.rel && (m.dx || m.dy)))) mouse.push(m);
+        // Clicks always forward; relative camera deltas forward as movement,
+        // and so do button hold transitions. Zero-delta camera reports carry no
+        // motion, so skip those unless they are a hold change.
+        if (m && (m.click || (m.rel && ((m.dx || m.dy) || m.held !== undefined)))) mouse.push(m);
     }
     return { keys: out, mouse };
 }
@@ -1121,7 +1124,7 @@ function flushConsoleInput(cons, now) {
     }
     const merged = cons.mode === 'democracy' ? mergeDemocracy(cons, active) : mergeAnarchy(cons, active);
     const serialized = [...merged.keys].sort().join(',') + '|' +
-        (merged.mouse.length ? merged.mouse.map((m) => m.rel ? `r${m.dx},${m.dy},${m.button}:${m.nonce || 0}` : `${m.x},${m.y},${m.button}:${m.nonce || 0}`).join(';') : '');
+        (merged.mouse.length ? merged.mouse.map((m) => m.rel ? `r${m.dx},${m.dy},${m.held === true ? 1 : m.held === false ? 0 : ''},${m.button}:${m.nonce || 0}` : `${m.x},${m.y},${m.button}:${m.nonce || 0}`).join(';') : '');
     // Consume clicks as soon as they're sent: a stored click:true would otherwise
     // be re-merged on every later input message (keys/keepalive) and re-trigger
     // mousedown+mouseup on the host, so one physical click becomes many.

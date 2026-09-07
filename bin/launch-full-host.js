@@ -689,8 +689,12 @@ function applyInput(keys, mouse) {
             // parsed by xdotool as an option and the move is dropped.
             const dx = Math.round(mouse.dx || 0), dy = Math.round(mouse.dy || 0);
             if (dx || dy) fireXdotool(['mousemove_relative', '--', String(dx), String(dy)]);
-            if (mouse.click) {
-                const btn = String(mouse.button || 1);
+            const btn = String(mouse.button || 1);
+            if (mouse.held === true) {
+                fireXdotool(['mousedown', btn]);
+            } else if (mouse.held === false) {
+                fireXdotool(['mouseup', btn]);
+            } else if (mouse.click) {
                 fireXdotool(['mousedown', btn]);
                 fireXdotool(['mouseup', btn], 60);
             }
