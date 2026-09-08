@@ -28,6 +28,7 @@ const { spawn, spawnSync } = require('child_process');
 const os = require('os');
 const path = require('path');
 const fs = require('fs');
+const util = require('util');
 const WebSocket = require('ws');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -757,9 +758,28 @@ function killGame() {
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 const LOG = process.env.EMULATOR_LOG || 'info';
-function logAt(level, ...a) { if (({ verbose: 0, info: 1 }[level] || 1) < ({ verbose: 0, info: 1 }[LOG] || 1)) return; console.log('[full]', ...a); }
+const LOG_FILE = process.env.EMULATOR_LOG_FILE || 'host.log';  // set to '' to disable
+let logStream = null;
+function writeLog(line) {
+    if (!LOG_FILE) return;
+    try {
+        if (!logStream) {
+            fs.mkdirSync(path.dirname(path.resolve(LOG_FILE)), { recursive: true });
+            logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
+            logStream.on('error', () => {});
+        }
+        logStream.write(line + '\n');
+    } catch {}
+}
+function logAt(level, ...a) {
+    if (({ verbose: 0, info: 1 }[level] || 1) < ({ verbose: 0, info: 1 }[LOG] || 1)) return;
+    const line = util.format(...a);
+    console.log('[full]', line);
+    writeLog(`[${new Date().toISOString()}] [full] ${line}`);
+}
 const log  = (...a) => logAt('info', ...a);
 const logV = (...a) => logAt('verbose', ...a);
+log(`logging to file: ${path.resolve(LOG_FILE)}`);
 
 // ── Relay link ───────────────────────────────────────────────────────────────
 function connect() {

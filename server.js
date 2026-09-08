@@ -27,6 +27,7 @@ const https = require('https');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const util = require('util');
 const Database = require('better-sqlite3');
 const { WebSocketServer } = require('ws');
 
@@ -67,16 +68,31 @@ const DISCORD_REDIRECT_URI  = (process.env.DISCORD_REDIRECT_URI || 'https://emus
 // ── Logging ──────────────────────────────────────────────────────────────────
 const LOG_INFO = process.env.EMULATOR_LOG || 'info'; // 'verbose' | 'info' | 'warn' | 'error'
 const LEVELS = { verbose: 0, info: 1, warn: 2, error: 3 };
+const LOG_FILE = process.env.EMULATOR_LOG_FILE || 'relay.log';  // set to '' to disable
+let logStream = null;
+function writeLog(line) {
+    if (!LOG_FILE) return;
+    try {
+        if (!logStream) {
+            fs.mkdirSync(path.dirname(path.resolve(LOG_FILE)), { recursive: true });
+            logStream = fs.createWriteStream(LOG_FILE, { flags: 'a' });
+            logStream.on('error', () => {});
+        }
+        logStream.write(line + '\n');
+    } catch {}
+}
 function logAt(level, ...a) {
     if ((LEVELS[level] || 1) < (LEVELS[LOG_INFO] || 1)) return;
-    const ts = new Date().toISOString();
+    const line = `[${new Date().toISOString()}] [${String(level).toUpperCase().padEnd(7)}] ` + util.format(...a);
     const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
-    fn(`[${ts}] [${level.toUpperCase().padEnd(7)}]`, ...a);
+    fn(line);
+    writeLog(line);
 }
 const log   = (...a) => logAt('info', ...a);
 const logV  = (...a) => logAt('verbose', ...a);   // noisiest: per-message / per-frame
 const warn  = (...a) => logAt('warn', ...a);
 const error = (...a) => logAt('error', ...a);
+log(`logging to file: ${path.resolve(LOG_FILE)}`);
 
 // ── Limits ───────────────────────────────────────────────────────────────────
 const MAX_VIEWERS_PER_CONSOLE = 250;
@@ -426,7 +442,7 @@ async function handleRegister(req, res) {
     if (password.length < 6) { logV(`register rejected: short password for "${username}"`); return json(res, 400, { message: 'password must be at least 6 characters' }); }
     if (qUserByName.get(username)) { logV(`register rejected: username taken "${username}"`); return json(res, 409, { message: 'username already taken' }); }
     qCreateUser.run(username, hashPassword(password), Date.now());
-    log(`auth: registered new user "${username}"`);
+    log(`auth: new account "${username}" created from ${req.socket.remoteAddress || 'unknown'}`);
     return json(res, 200, { message: 'registered' });
 }
 
