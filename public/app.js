@@ -954,19 +954,29 @@ async function configureVideo(config) {
     }));
 
     try {
-        const support = await VideoDecoder.isConfigSupported(decoderConfig);
+        let support = await VideoDecoder.isConfigSupported(decoderConfig);
         console.log('[decoder] isConfigSupported RESULT:', JSON.stringify({ supported: !!(support && support.supported), error: support && support.error ? String(support.error.message || support.error) : (support && support.config ? JSON.stringify(support.config) : null) }));
         if (!support || !support.supported) {
             const reason = support && support.error ? String(support.error.message || support.error) : '(no error detail)';
-            console.warn('[decoder] isConfigSupported rejected:', JSON.stringify({
-                codec: decoderConfig.codec,
-                codedWidth: decoderConfig.codedWidth,
-                codedHeight: decoderConfig.codedHeight,
-                hasDescription: !!decoderConfig.description,
-                reason,
-            }));
-            setStreamStatus(`browser can't decode ${config.codec} (${reason})` + decodeSupportStatus());
-            return;
+            // Android/iPhone-class browsers have no software H.264 decoder, so
+            // prefer-software is reported as unsupported there (silently, with
+            // no error detail). Re-check with the default acceleration hint.
+            if (decoderConfig.hardwareAcceleration === 'prefer-software') {
+                const retry = { ...decoderConfig, hardwareAcceleration: 'no-preference' };
+                console.warn('[decoder] prefer-software not supported; rechecking with no-preference:', JSON.stringify({ codec: retry.codec, codedWidth: retry.codedWidth, codedHeight: retry.codedHeight }));
+                const support2 = await VideoDecoder.isConfigSupported(retry);
+                console.log('[decoder] isConfigSupported (no-preference) RESULT:', JSON.stringify({ supported: !!(support2 && support2.supported), error: support2 && support2.error ? String(support2.error.message || support2.error) : null }));
+                if (support2 && support2.supported) {
+                    decoderConfig = retry;
+                } else {
+                    setStreamStatus(`browser can't decode ${config.codec} (${support2 && support2.error ? String(support2.error.message || support2.error) : '(no error detail)'})` + decodeSupportStatus());
+                    return;
+                }
+            } else {
+                console.warn('[decoder] isConfigSupported rejected:', JSON.stringify({ codec: decoderConfig.codec, codedWidth: decoderConfig.codedWidth, codedHeight: decoderConfig.codedHeight, hasDescription: !!decoderConfig.description, reason }));
+                setStreamStatus(`browser can't decode ${config.codec} (${reason})` + decodeSupportStatus());
+                return;
+            }
         }
     } catch (e) {
         console.warn('[decoder] isConfigSupported threw:', e);
