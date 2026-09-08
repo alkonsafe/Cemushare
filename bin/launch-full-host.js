@@ -96,6 +96,11 @@ const videoCapturePath = arg('--vcapture', '', 'EMULATOR_VCAPTURE');
 const keyFilter  = arg('--keys', process.env.EMULATOR_KEYS || 'all', 'EMULATOR_KEYS');
 const canvasW  = arg('--cw', process.env.EMULATOR_CW || '', 'EMULATOR_CW');
 const canvasH  = arg('--ch', process.env.EMULATOR_CH || '', 'EMULATOR_CH');
+// --no-xfwm4 (aka EMULATOR_NO_XFWM4=1): skip the window manager entirely.
+// Windows then render unmanaged/undecorated (no title bar, no buttons) and the
+// host doesn't require dbus/xfconf either. Usable when a game is fine without
+// being mapped by a WM (e.g. it draws its own borderless fullscreen surface).
+const noWm = process.argv.includes('--no-xfwm4') || ['1', 'true', 'yes'].includes(String(process.env.EMULATOR_NO_XFWM4 || '').toLowerCase());
 
 function usage() {
     console.log(`
@@ -120,6 +125,9 @@ Options:
   --keys      <all|none|list>  Which keys viewers may send: 'all', 'none', or a
                                comma-separated allowlist (DOM codes KeyW/ArrowUp/
                                Space or xdotool names w/Up/space; e.g. w,a,s,d,space)
+  --no-xfwm4                 Skip the window manager entirely (no title bars /
+                               minimize/close buttons; also drops the dbus/xfconf
+                               requirement for xfwm4). Windows are unWM-managed.
   --display   <N>            Xvfb display number (default 99)
   --vcapture  <file>         Tee exact raw video bytes (IVF or Annex-B) to a file for offline repro
   --check                   Verify required binaries + games.json and exit
@@ -136,12 +144,22 @@ function bin(name) {
     return r.status === 0 ? r.stdout.toString().trim() : null;
 }
 
-const REQUIRED = ['Xvfb', 'xfwm4', 'pulseaudio', 'pactl', 'ffmpeg', 'xdotool'];
+const REQUIRED = ['Xvfb', 'pulseaudio', 'pactl', 'ffmpeg', 'xdotool', 'xprop'];
+if (!noWm) REQUIRED.push('xfwm4', 'dbus-daemon', 'xfconfd');
+function xfconfdBin() {
+    const c = bin('xfconfd');
+    if (c) return c;
+    // xfconfd ships in the Xfce libexec dir, which is not on PATH.
+    for (const p of ['/usr/libexec/xfconfd', '/usr/lib/x86_64-linux-gnu/xfce4/xfconf/xfconfd']) {
+        try { if (fs.existsSync(p)) return p; } catch {}
+    }
+    return null;
+}
 function checkTools() {
-    const missing = REQUIRED.filter((t) => !bin(t));
+    const missing = REQUIRED.filter((t) => (t === 'xfconfd' ? !xfconfdBin() : !bin(t)));
     if (missing.length) {
         console.error('ERROR: missing required tools for full-host: ' + missing.join(', '));
-        console.error('  Install with: sudo apt install xvfb xfwm4 pulseaudio ffmpeg xdotool');
+        console.error('  Install with: sudo apt install xvfb xfwm4 pulseaudio ffmpeg xdotool x11-utils dbus-x11 xfconf');
         return false;
     }
     // The ffmpeg build must actually ship the encoders we rely on — if they are
@@ -285,10 +303,68 @@ function setupNullSink(rt) {
 }
 
 // ── 3) Start xfwm4 (window manager) ──────────────────────────────────────────
+// xfwm4 needs the xfconf settings daemon on a D-Bus session bus; a bare headless
+// box has neither, so xfwm4 aborts instantly with "Xfconf could not be
+// initialized / Missing data from default files". We spin up a private session
+// bus + xfconfd inside the runtime dir (never touching the machine's bus) and
+// seed the default xfwm4 channel file so the daemon has data to serve.
+const WM_CHANNEL_XML = `<?xml version="1.0" encoding="UTF-8"?>
+<channel name="xfwm4" version="1.0">
+  <property name="general" type="empty">
+    <property name="maximized_offset" type="int" value="0"/>
+    <property name="placement_mode" type="string" value="center"/>
+    <property name="placement_ratio" type="int" value="20"/>
+    <property name="prevent_focus_stealing" type="bool" value="false"/>
+    <property name="raise_delay" type="int" value="250"/>
+    <property name="theme" type="string" value="Default"/>
+    <property name="title_font" type="string" value="Sans 10"/>
+    <property name="workspace_count" type="int" value="1"/>
+    <property name="workspace_names" type="array">
+      <value type="string" value="Desktop 1"/>
+    </property>
+  </property>
+</channel>
+`;
+function seedXfconfDefaults(configHome) {
+    const dir = path.join(configHome, 'xfce4', 'xfconf', 'xfce-perchannel-xml');
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, 'xfwm4.xml');
+    if (fs.existsSync(file)) return;
+    try { fs.writeFileSync(file, WM_CHANNEL_XML); log(`seeded xfwm4 defaults: ${file}`); }
+    catch (err) { log(`could not seed xfwm4 defaults: ${err.message}`); }
+}
 function startWm() {
-    const wm = track(spawn('xfwm4', [], { env: childEnv(), stdio: ['ignore', 'pipe', 'pipe'] }));
+    if (noWm) {
+        log('--no-xfwm4: window manager disabled (windows stay unmanaged/undecorated)');
+        return null;
+    }
+    let addr = '';
+    const bus = spawnSync('dbus-daemon', ['--session', '--fork', '--print-address=1', '--print-pid=1'],
+        { env: childEnv(), encoding: 'utf8' });
+    if (bus.status === 0) addr = String(bus.stdout || '').split(/\s+/)[0] || '';
+    if (!addr) { log('WARNING: could not start a D-Bus session bus; xfwm4 may fail'); }
+
+    const configHome = path.join(RUNTIME_DIR, 'config');
+    fs.mkdirSync(configHome, { recursive: true });
+    seedXfconfDefaults(configHome);
+    const env = childEnv({
+        DBUS_SESSION_BUS_ADDRESS: addr,
+        XDG_CONFIG_HOME: configHome,
+        LANG: 'C.UTF-8',
+        LC_ALL: 'C.UTF-8',
+    });
+    if (addr) {
+        const xd = xfconfdBin();
+        if (xd) {
+            const d = track(spawn(xd, [], { env, stdio: ['ignore', 'pipe', 'pipe'] }));
+            d.on('error', onSpawnError('xfconfd'));
+            d.stdout.on('data', () => {});
+            d.stderr.on('data', () => {});
+        }
+    }
+    const wm = track(spawn('xfwm4', [], { env, stdio: ['ignore', 'pipe', 'pipe'] }));
     wm.on('error', onSpawnError('xfwm4'));
-    wm.stderr.on('data', () => {});
+    wm.stderr.on('data', (d) => process.stderr.write(d));
     wm.stdout.on('data', () => {});
     return wm;
 }
@@ -715,6 +791,45 @@ function applyInput(keys, mouse) {
 }
 function releaseAll() { applyInput([], null); }
 
+// ── Window arrange / undecorate ─────────────────────────────────────────────
+// Games open their own window wherever/thoever they like. We find any window
+// that appears after the spawn and (best-effort) fill the virtual screen and
+// strip the frame: no minimize or close buttons in the stream. Works for any
+// game — no title/key matching needed.
+function listTopWindows() {
+    const r = spawnSync('xdotool', ['search', '--maxdepth', '2', '--onlyvisible', '--name', '.*'],
+        { env: childEnv(), encoding: 'utf8' });
+    return r.status === 0 ? r.stdout.trim().split(/\s+/).filter(Boolean) : [];
+}
+function undecorate(wid) {
+    // _MOTIF_WM_HINTS flags=2 (MWM_HINTS_DECORATIONS), decorations=0 → no frame.
+    spawnSync('xprop', ['-id', wid, '-f', '_MOTIF_WM_HINTS', '32c', '-set', '_MOTIF_WM_HINTS', '2, 0, 0, 0, 0'],
+        { env: childEnv(), stdio: 'ignore' });
+}
+let arrangeTimer = null;
+function arrangeNewWindows(before) {
+    clearInterval(arrangeTimer);
+    let calm = 0;
+    arrangeTimer = setInterval(() => {
+        if (!gameChild || !gameChild.pid || gameChild.exitCode !== null) { clearInterval(arrangeTimer); return; }
+        const fresh = listTopWindows().filter((w) => !before.has(w));
+        if (fresh.length) {
+            calm = 0;
+            for (const wid of fresh) {
+                if (!noWm) {
+                    spawnSync('xdotool', ['windowsize', wid, String(resX || w), String(resY || h)], { env: childEnv(), stdio: 'ignore' });
+                    spawnSync('xdotool', ['windowmove', wid, '0', '0'], { env: childEnv(), stdio: 'ignore' });
+                    spawnSync('xdotool', ['windowactivate', wid], { env: childEnv(), stdio: 'ignore' });
+                }
+                undecorate(wid);
+                log(`arranged game window ${wid}: ${noWm ? 'unmanaged' : 'filled'} ${resX || w}x${resY || h}, decorations off`);
+            }
+        } else if (++calm > 8) {
+            clearInterval(arrangeTimer);   // ~4s without a new window → done
+        }
+    }, 500);
+}
+
 // ── Game lifecycle ────────────────────────────────────────────────────────────
 let gameChild = null, currentGameKey = null;
 function broadcastState() {
@@ -737,6 +852,8 @@ function launchGame(key) {
         gameChild.stdout.on('data', () => {});
         currentGameKey = key;
         broadcastState();
+        // Any window that maps after the spawn is the game: fill + strip frame.
+        arrangeNewWindows(new Set(listTopWindows()));
         gameChild.on('error', (err) => {
             // e.g. ENOENT — the game binary isn't installed. This must NOT kill
             // the host: log it, clear state, keep the desktop streaming.
@@ -863,8 +980,12 @@ async function main() {
     console.log(`[full] pulseaudio ready (null sink "${sinkName}")`);
 
     startWm();
-    await new Promise((r) => setTimeout(r, 800));
-    console.log('[full] window manager up');
+    if (noWm) {
+        console.log('[full] window manager disabled (--no-xfwm4)');
+    } else {
+        await new Promise((r) => setTimeout(r, 800));
+        console.log('[full] window manager up');
+    }
     setNiceCursor();
 
     connect();
