@@ -930,9 +930,12 @@ function handleViewerMsg(cons, v, msg) {
                 // this, click 2 looks identical to click 1 in the merge state).
                 if (v.mouse.click) { v.clickNonce = (v.clickNonce || 0) + 1; v.mouse.nonce = v.clickNonce; }
             }
+            const pressed = [...next].filter((k) => !v.keys.has(k));
+            const released = [...v.keys].filter((k) => !next.has(k));
             v.keys = next;
             v.keysAt = Date.now();
-            if (next.size) logV(`input: ${v.username} keys=[${[...next].join(',')}] console=${cons.key}`);
+            if (pressed.length) log(`key: ${v.username} (${v.id}) pressed [${pressed.join(',')}] on "${cons.key}"`);
+            if (released.length) log(`key: ${v.username} (${v.id}) released [${released.join(',')}] on "${cons.key}"`);
             // Low-latency path: a viewer changed its keys, so forward the merge to
             // the host on this tick-of-event-loop instead of waiting for the next
             // 30Hz poll. The merge functions dedupe identical states, so this is

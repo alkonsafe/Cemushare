@@ -406,8 +406,8 @@ function keyEvent(type, code) {
 
 function applyInput(keys) {
     const desired = new Set(keys);
-    for (const code of [...held]) if (!desired.has(code)) { keyEvent('keyup', code); held.delete(code); }
-    for (const code of desired) if (!held.has(code)) { keyEvent('keydown', code); held.add(code); }
+    for (const code of [...held]) if (!desired.has(code)) { keyEvent('keyup', code); held.delete(code); log(`key: released ${code}`); }
+    for (const code of desired) if (!held.has(code)) { keyEvent('keydown', code); held.add(code); log(`key: pressed ${code}`); }
 }
 
 function mouseEvent(type, x, y, button) {

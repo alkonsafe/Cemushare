@@ -668,18 +668,18 @@ function applyInput(keys, mouse) {
             if (t && (allowedKeys.has(k) || allowedKeys.has(t))) desired.add(t);
         }
         for (const k of [...heldKeys]) {
-            if (!desired.has(k)) { fireXdotool(['keyup', k]); heldKeys.delete(k); }
+            if (!desired.has(k)) { fireXdotool(['keyup', k]); heldKeys.delete(k); log(`key: released ${k}`); }
         }
     } else {
         // 'all' mode — forward everything (original behavior).
         const d = new Set((keys || []).map((k) => domKeyToXdotool(k)).filter(Boolean));
         for (const k of [...heldKeys]) {
-            if (!d.has(k)) { fireXdotool(['keyup', k]); heldKeys.delete(k); }
+            if (!d.has(k)) { fireXdotool(['keyup', k]); heldKeys.delete(k); log(`key: released ${k}`); }
         }
-        for (const t of d) if (!heldKeys.has(t)) { fireXdotool(['keydown', t]); heldKeys.add(t); }
+        for (const t of d) if (!heldKeys.has(t)) { fireXdotool(['keydown', t]); heldKeys.add(t); log(`key: pressed ${t}`); }
     }
     for (const t of [...desired]) {
-        if (!heldKeys.has(t)) { fireXdotool(['keydown', t]); heldKeys.add(t); }
+        if (!heldKeys.has(t)) { fireXdotool(['keydown', t]); heldKeys.add(t); log(`key: pressed ${t}`); }
     }
     if (mouse) {
         const dispW = resX || w, dispH = resY || h;
