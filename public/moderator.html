@@ -60,7 +60,7 @@
   </section>
 
   <section><h2>registered users</h2>
-    <table><thead><tr><th>id</th><th>username</th><th>discord</th><th>created</th><th>state</th><th></th></tr></thead>
+    <table><thead><tr><th>id</th><th>username</th><th>discord</th><th>last ip</th><th>created</th><th>state</th><th></th></tr></thead>
     <tbody id="users"></tbody></table>
   </section>
 
@@ -141,9 +141,13 @@ function render(p) {
       <td class="muted">${u.id}</td>
       <td>${esc(u.username)}</td>
       <td>${u.discord ? '✓' : ''}</td>
+      <td class="mono">${esc(u.ip || '—')}</td>
       <td class="muted">${fmtD(u.createdAt)}</td>
       <td>${u.banned ? '<span class="pill banned">banned</span>' : '<span class="pill on">ok</span>'}</td>
-      <td><button class="${u.banned ? 'ok' : 'danger'}" onclick="banUser('${esc(u.username)}', ${u.banned})">${u.banned ? 'unban' : 'ban'}</button></td>
+      <td>
+        <button class="${u.banned ? 'ok' : 'danger'}" onclick="banUser('${esc(u.username)}', ${u.banned})">${u.banned ? 'unban' : 'ban'}</button>
+        ${u.ip ? `<button class="danger" onclick="banIp('${esc(u.ip)}')">ban ip</button>` : ''}
+      </td>
     </tr>`).join('');
 
   document.getElementById('keylog').innerHTML = p.keylog.slice().reverse().map((k) => `
@@ -242,6 +246,7 @@ async function banUser(name, banned) {
   await jpost('/api/admin/' + (banned ? 'unban' : 'ban'), { kind: 'user', value: name });
   refresh();
 }
+async function banIp(ip) { await jpost('/api/admin/ban', { kind: 'ip', value: ip }); refresh(); }
 async function unban(kind, value) { await jpost('/api/admin/unban', { kind, value }); refresh(); }
 async function ban() {
   const kind = document.getElementById('banKind').value;

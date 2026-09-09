@@ -220,6 +220,10 @@ if (!userCols.some((c) => c.name === 'discord_id')) {
     db.exec('ALTER TABLE users ADD COLUMN discord_id TEXT');
 }
 db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_id ON users(discord_id) WHERE discord_id IS NOT NULL');
+// Last IP we saw this user connect from (tunnel-resolved), for the admin panel.
+if (!userCols.some((c) => c.name === 'last_ip')) {
+    db.exec('ALTER TABLE users ADD COLUMN last_ip TEXT');
+}
 
 const qUserByName     = db.prepare('SELECT * FROM users WHERE username = ?');
 const qUserById       = db.prepare('SELECT * FROM users WHERE id = ?');
@@ -258,6 +262,7 @@ const qAddBan         = db.prepare('INSERT OR REPLACE INTO bans (kind, value, re
 const qDelBan         = db.prepare('DELETE FROM bans WHERE kind = ? AND value = ?');
 const qBannedUsers    = db.prepare("SELECT value FROM bans WHERE kind = 'user'");
 const qDeleteSessionsByUser = db.prepare('DELETE FROM sessions WHERE user_id = ?');
+const qSetUserIp     = db.prepare('UPDATE users SET last_ip = ? WHERE id = ?');
 
 // clean expired sessions occasionally
 setInterval(() => { try { qDeleteSession.run(Date.now()); } catch {} }, 60 * 60 * 1000);
@@ -500,7 +505,8 @@ async function handleRegister(req, res) {
     let body; try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { message: 'bad request' }); }
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
-    if (qGetBan.get('ip', clientIp(req))) { log(`auth: register blocked — banned ip ${clientIp(req)}`); return json(res, 403, { message: 'banned' }); }
+    const ip = clientIp(req);
+    if (qGetBan.get('ip', ip)) { log(`auth: register blocked — banned ip ${ip}`); return json(res, 403, { message: 'banned' }); }
     if (qGetBan.get('user', username)) { log(`auth: register blocked — banned user "${username}"`); return json(res, 403, { message: 'banned' }); }
     if (username.length < 3 || username.length > 24 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
         logV(`register rejected: bad username "${username}"`);
@@ -508,8 +514,9 @@ async function handleRegister(req, res) {
     }
     if (password.length < 6) { logV(`register rejected: short password for "${username}"`); return json(res, 400, { message: 'password must be at least 6 characters' }); }
     if (qUserByName.get(username)) { logV(`register rejected: username taken "${username}"`); return json(res, 409, { message: 'username already taken' }); }
-    qCreateUser.run(username, await hashPassword(password), Date.now());
-    log(`auth: new account "${username}" created from ${req.socket.remoteAddress || 'unknown'}`);
+    const info = qCreateUser.run(username, await hashPassword(password), Date.now());
+    qSetUserIp.run(ip, Number(info.lastInsertRowid));
+    log(`auth: new account "${username}" created from ${ip}`);
     return json(res, 200, { message: 'registered' });
 }
 
@@ -519,13 +526,15 @@ async function handleLogin(req, res) {
     let body; try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { message: 'bad request' }); }
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
-    if (qGetBan.get('ip', clientIp(req))) { warn(`auth: login blocked — banned ip ${clientIp(req)}`); return json(res, 403, { message: 'banned' }); }
+    const ip = clientIp(req);
+    if (qGetBan.get('ip', ip)) { warn(`auth: login blocked — banned ip ${ip}`); return json(res, 403, { message: 'banned' }); }
     if (qGetBan.get('user', username)) { warn(`auth: login blocked — banned user "${username}"`); return json(res, 403, { message: 'banned' }); }
     const user = qUserByName.get(username);
     if (!user || !(await verifyPassword(password, user.password_hash))) {
         warn(`auth: failed login for "${username}"`);
         return json(res, 401, { message: 'invalid username or password' });
     }
+    qSetUserIp.run(ip, user.id);
 
     const ttl = 14 * 24 * 60 * 60 * 1000; // 14 days
     const token = makeToken({ sub: user.id, username: user.username }, ttl);
@@ -705,7 +714,7 @@ async function handleAdminApi(req, res, url) {
                 keylogFile: KEYLOG_FILE || '(disabled)',
             },
             consoles: consRows,
-            users: qListUsers.all().map((u) => ({ id: u.id, username: u.username, createdAt: u.created_at, discord: !!u.discord_id, banned: bannedUsers.has(u.username) })),
+            users: qListUsers.all().map((u) => ({ id: u.id, username: u.username, createdAt: u.created_at, discord: !!u.discord_id, ip: u.last_ip || '', banned: bannedUsers.has(u.username) })),
             admins: qListAdmins.all(),
             bans: qListBans.all(),
             keylog: keylog.slice(-300),
@@ -944,6 +953,7 @@ server.on('upgrade', (req, socket, head) => {
         if (sess) {
             if (qGetBan.get('user', sess.username)) { warn(`ws: viewer connect blocked — banned user "${sess.username}"`); socket.destroy(); return; }
             user = { id: sess.user_id, username: sess.username };
+            qSetUserIp.run(ip, sess.user_id);   // keep their last-known ip fresh
         } else {
             // Guest mode for local LAN testing without an account.
             if (process.env.EMULATOR_ALLOW_GUEST === '1') user = { id: null, username: 'Guest' };
