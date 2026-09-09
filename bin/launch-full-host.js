@@ -849,33 +849,41 @@ function writeLog(line) {
         logStream.write(line + '\n');
     } catch {}
 }
-// Batch stdout like the relay does: console.log is sync on TTY/file, and a
-// paused terminal (Ctrl+S, frozen SSH scrollback) would stall the host loop —
-// including key input replay and capture management. Flush every 150ms, drop
-// the backlog if the reader is stuck.
+// Batch stdout/stderr like the relay does: console.log/error are sync on
+// TTY/file, and a paused terminal (Ctrl+S, frozen SSH scrollback) would stall
+// the host loop — including key input replay and capture management. All
+// levels (warn/error included) flush every 150ms; a stuck reader gets its
+// backlog dropped instead of freezing the host.
 const OUT_FLUSH_MS = 150;
 const OUT_MAX_BACKLOG = 1 * 1024 * 1024;
-let outBuf = [];
+let outBuf = [], errBuf = [];
 let outTimer = null;
-function flushStdout() {
+function flushStreams() {
     outTimer = null;
-    if (!outBuf.length) return;
-    const text = outBuf.join('');
-    outBuf = [];
-    if (process.stdout && process.stdout.writableLength > OUT_MAX_BACKLOG) return;
-    try { process.stdout.write(text); } catch {}
+    if (outBuf.length) {
+        const t = outBuf.join(''); outBuf = [];
+        if (!(process.stdout && process.stdout.writableLength > OUT_MAX_BACKLOG)) { try { process.stdout.write(t); } catch {} }
+    }
+    if (errBuf.length) {
+        const t = errBuf.join(''); errBuf = [];
+        if (!(process.stderr && process.stderr.writableLength > OUT_MAX_BACKLOG)) { try { process.stderr.write(t); } catch {} }
+    }
 }
-function queueStdout(line) {
-    outBuf.push(line + '\n');
-    if (!outTimer) { outTimer = setTimeout(flushStdout, OUT_FLUSH_MS); if (outTimer.unref) outTimer.unref(); }
+function queue(line, isErr) {
+    (isErr ? errBuf : outBuf).push(line + '\n');
+    if (!outTimer) { outTimer = setTimeout(flushStreams, OUT_FLUSH_MS); if (outTimer.unref) outTimer.unref(); }
 }
 function logAt(level, ...a) {
     if (({ verbose: 0, info: 1 }[level] || 1) < ({ verbose: 0, info: 1 }[LOG] || 1)) return;
     const line = util.format(...a);
-    try { (level === 'error' || level === 'warn' ? console.error : queueStdout)(line); } catch {}
+    try { queue(line, level === 'error' || level === 'warn'); } catch {}
     writeLog(`[${new Date().toISOString()}] [full] ${line}`);
 }
-process.on('exit', () => { if (outBuf.length) { try { process.stdout.write(outBuf.join('')); } catch {} outBuf = []; } });
+process.on('exit', () => {
+    try { if (outBuf.length) process.stdout.write(outBuf.join('')); } catch {}
+    try { if (errBuf.length) process.stderr.write(errBuf.join('')); } catch {}
+    outBuf = []; errBuf = [];
+});
 const log  = (...a) => logAt('info', ...a);
 const logV = (...a) => logAt('verbose', ...a);
 log(`logging to file: ${path.resolve(LOG_FILE)}`);
