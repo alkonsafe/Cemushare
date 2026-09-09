@@ -162,7 +162,10 @@ function showBanScreen(kind) {
     el.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#0b0e14;color:#dbe2ef;display:flex;align-items:center;justify-content:center;padding:2rem;';
     el.innerHTML = `
         <div style="max-width:520px;text-align:center;background:#161012;border:1px solid #6e2b33;border-radius:16px;padding:2.5rem;">
-            <div style="font-size:3rem;">🚫</div>
+            <svg width="76" height="76" viewBox="0 0 24 24" fill="none" aria-hidden="true" style="display:block;margin:0 auto;">
+                <circle cx="12" cy="12" r="9.25" stroke="#e0707a" stroke-width="2.2"/>
+                <line x1="5.9" y1="5.9" x2="18.1" y2="18.1" stroke="#e0707a" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
             <h1 style="font-size:1.4rem;margin:.8rem 0;color:#e0707a;">You are banned!</h1>
             <p style="color:#8b96ab;line-height:1.6;margin:0;">You did something bad, and are no longer allowed to use emulatorSHARE. Bye!</p>
             <p style="color:#5a6478;font-size:.8rem;margin-top:1.2rem;">(${kind === 'ip' ? 'your network is banned' : 'your account is banned'})</p>
