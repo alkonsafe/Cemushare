@@ -485,6 +485,16 @@ async function handleLogin(req, res) {
 }
 
 // ── Admin panel (/moderator) ────────────────────────────────────────────────
+// Ban check for the viewer: reports whether THIS visitor (session token and/or
+// IP) is banned, so the page can show the ban screen instead of the app.
+async function handleBanCheck(req, res) {
+    const ip = clientIp(req);
+    const user = await userFromReq(req);
+    if (user && await dbq('get', 'getBan', ['user', user.username])) return json(res, 200, { banned: true, kind: 'user' });
+    if (await dbq('get', 'getBan', ['ip', ip])) return json(res, 200, { banned: true, kind: 'ip' });
+    return json(res, 200, { banned: false });
+}
+
 // Access = RELAY_OWNER (implicit) OR a row in the admins table. The panel page
 // is served at /moderator and talks to /api/admin/* with the viewer's session
 // token as a Bearer header. Bans are enforced on register/login/WS-connect.
@@ -849,6 +859,7 @@ const server = http.createServer(async (req, res) => {
     try {
         if (url === '/api/register') return handleRegister(req, res);
         if (url === '/api/login') return handleLogin(req, res);
+        if (url === '/api/bancheck') return handleBanCheck(req, res);
         if (url === '/api/discord/auth') return handleDiscordAuth(req, res);
         if (url === '/moderator') return serveModerator(res);
         if (url.startsWith('/api/admin/')) return handleAdminApi(req, res, url);

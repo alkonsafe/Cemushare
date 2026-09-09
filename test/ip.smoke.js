@@ -50,6 +50,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         body: JSON.stringify({ username: 'directuser', password: 'pw123456' }),
     });
     check('ip ban (real header ip) blocks login', blocked.status === 403, String(blocked.status));
+    const bcBanned = await fetch(`http://127.0.0.1:${PORT}/api/bancheck`, { headers: { 'CF-Connecting-IP': '203.0.113.9' } });
+    const bcBannedBody = await bcBanned.json();
+    check('bancheck: banned ip reports banned', bcBanned.status === 200 && bcBannedBody.banned === true && bcBannedBody.kind === 'ip', JSON.stringify(bcBannedBody));
+    const bcClean = await fetch(`http://127.0.0.1:${PORT}/api/bancheck`);
+    const bcCleanBody = await bcClean.json();
+    check('bancheck: clean socket reports not banned', bcCleanBody.banned === false, JSON.stringify(bcCleanBody));
     const direct = await fetch(`http://127.0.0.1:${PORT}/api/login`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: 'directuser', password: 'pw123456' }),

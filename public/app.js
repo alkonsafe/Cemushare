@@ -141,6 +141,36 @@ function checkAuth() {
     }
 }
 
+// ── Ban screen ────────────────────────────────────────────────────────────────
+// Ask the relay whether this visitor (account and/or IP) is banned before
+// showing any app UI. If yes, nothing else loads - just the ban screen.
+async function checkBanThenAuth() {
+    try {
+        const token = localStorage.getItem('token');
+        const res = await fetch(`${API_BASE}/api/bancheck`, token ? { headers: { Authorization: 'Bearer ' + token } } : undefined);
+        if (res.ok) {
+            const data = await res.json();
+            if (data && data.banned) return showBanScreen(data.kind);
+        }
+    } catch {}
+    checkAuth();
+}
+
+function showBanScreen(kind) {
+    document.body.style.overflow = 'hidden';
+    const el = document.createElement('div');
+    el.id = 'banScreen';
+    el.style.cssText = 'position:fixed;inset:0;z-index:99999;background:#0b0e14;color:#dbe2ef;display:flex;align-items:center;justify-content:center;padding:2rem;';
+    el.innerHTML = `
+        <div style="max-width:520px;text-align:center;background:#161012;border:1px solid #6e2b33;border-radius:16px;padding:2.5rem;">
+            <div style="font-size:3rem;">🚫</div>
+            <h1 style="font-size:1.4rem;margin:.8rem 0;color:#e0707a;">You are banned!</h1>
+            <p style="color:#8b96ab;line-height:1.6;margin:0;">You did something bad, and are no longer allowed to use emulatorSHARE. Bye!</p>
+            <p style="color:#5a6478;font-size:.8rem;margin-top:1.2rem;">(${kind === 'ip' ? 'your network is banned' : 'your account is banned'})</p>
+        </div>`;
+    document.body.appendChild(el);
+}
+
 function showAuth() {
     document.getElementById('authContainer').classList.remove('hidden');
     document.getElementById('appContainer').classList.add('hidden');
@@ -337,7 +367,7 @@ document.addEventListener('DOMContentLoaded', () => {
     probeCodecSupport();
     initTheme();
     initTouchSound();
-    checkAuth();
+    checkBanThenAuth();
     buildMobileGamepad();
     bindMobileGamepad();
     applyGamepadVisibility();
