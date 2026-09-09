@@ -232,6 +232,8 @@ async function autoDiscordAuth() {
 function showApp() {
     document.getElementById('authContainer').classList.add('hidden');
     document.getElementById('appContainer').classList.remove('hidden');
+    const badge = document.getElementById('userBadge');
+    if (badge) badge.textContent = '@' + (getCurrentUsername() || 'guest');
     navigateTo('main');
 }
 
