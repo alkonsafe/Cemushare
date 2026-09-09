@@ -724,6 +724,11 @@ function handleStreamMessage(msg) {
         case 'welcome':
             if (msg.error) {
                 currentConsoleName = null;
+                if (msg.error === 'duplicate-client') {
+                    alert("close the other tab bro!");
+                    location.href = '/';
+                    break;
+                }
                 setStreamStatus('console is gone');
                 if (streamWs) { try { streamWs.close(); } catch {} streamWs = null; }
                 break;

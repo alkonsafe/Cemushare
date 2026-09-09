@@ -1065,6 +1065,25 @@ function attachViewer(ws, consoleParam, user, ip) {
         return;
     }
 
+    // One connection per client per console: a second tab/window from the same
+    // person is bounced back to the homepage instead of forking their input.
+    // Guests (no account) are deduped by IP since they all share the name.
+    const dup = [...cons.viewers.values()].find((o) =>
+        (user.id != null ? o.username === user.username : (o.userId == null && o.ip === ip)));
+    if (dup) {
+        if (dup.ws.readyState === 1) {
+            log(`viewer: rejected — "${user.username}" already has a tab open on "${cons.key}"`);
+            ws.send(JSON.stringify({ t: 'welcome', host: false, video: null, audio: null, error: 'duplicate-client' }));
+            const die = () => { try { ws.close(4005, 'duplicate-client'); } catch {} };
+            setTimeout(die, 300);
+            return;
+        }
+        // The existing socket is half-dead (gone without a close) — drop it
+        // and let this fresh connection take over instead of bouncing them.
+        try { dup.ws.close(); } catch {}
+        cons.viewers.delete(dup.id);
+    }
+
     const v = {
         id: nextViewerId(),
         ws,
