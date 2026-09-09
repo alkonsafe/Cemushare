@@ -509,8 +509,26 @@ function isRelayAdmin(username) {
     if (RELAY_OWNER && username === RELAY_OWNER) return true;
     return !!qGetAdmin.get(username);
 }
+// Real client IP. Behind a reverse proxy / cloudflared tunnel every socket is
+// local (127.0.0.1), so when the peer is loopback/private we read the IP from
+// the proxy headers instead (CF-Connecting-IP set by Cloudflare edge, then
+// X-Forwarded-For). Direct connections from public IPs ignore those headers —
+// otherwise a client could spoof its way past an IP ban.
+const TRUST_PROXY = process.env.EMULATOR_TRUST_PROXY === '1';
+function isPrivateIp(ip) {
+    return ip === '::1' ||
+        /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|0\.)/.test(ip) ||
+        /^(::1|f[cd][0-9a-f]{2}:)/i.test(ip);
+}
 function clientIp(req) {
-    return String((req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
+    const direct = String((req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
+    if (TRUST_PROXY || isPrivateIp(direct)) {
+        const cf = req.headers['cf-connecting-ip'];
+        if (cf) return String(cf).trim().slice(0, 64);
+        const xff = req.headers['x-forwarded-for'];
+        if (xff) return String(xff).split(',')[0].trim().slice(0, 64);
+    }
+    return direct;
 }
 function userFromReq(req) {
     let token = null;
