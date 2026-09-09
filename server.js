@@ -64,6 +64,10 @@ const JWT_SECRET   = process.env.EMULATOR_JWT_SECRET || 'dev-secret-change-me';
 const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID || '';
 const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '';
 const DISCORD_REDIRECT_URI  = (process.env.DISCORD_REDIRECT_URI || 'https://emushare.alkonsafe.dpdns.org/').trim();
+// Admin panel (/moderator): RELAY_OWNER names the implicit owner (always admin);
+// every other admin lives in the `admins` table and is managed from the panel.
+const RELAY_OWNER  = (process.env.RELAY_OWNER || '').trim();
+const KEYLOG_FILE  = process.env.EMULATOR_KEYLOG_FILE || 'keylog.log';
 
 // ── Logging ──────────────────────────────────────────────────────────────────
 const LOG_INFO = process.env.EMULATOR_LOG || 'info'; // 'verbose' | 'info' | 'warn' | 'error'
@@ -168,6 +172,17 @@ db.exec(`
     updated_at  INTEGER NOT NULL,
     last_seen   INTEGER
   );
+  CREATE TABLE IF NOT EXISTS admins (
+    username TEXT PRIMARY KEY,
+    added_at INTEGER NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS bans (
+    kind     TEXT NOT NULL,
+    value    TEXT NOT NULL,
+    reason   TEXT,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, value)
+  );
 `);
 
 // Discord-linked accounts: add column to existing DBs, index non-null rows only.
@@ -201,6 +216,19 @@ const qTouchConsole   = db.prepare('UPDATE consoles SET last_seen = ? WHERE key 
 const qListConsoles   = db.prepare('SELECT * FROM consoles ORDER BY updated_at DESC');
 const qDeleteConsole  = db.prepare('DELETE FROM consoles WHERE key = ?');
 const qSetImage       = db.prepare('UPDATE consoles SET image = ?, updated_at = ? WHERE key = ?');
+
+const qCountUsers     = db.prepare('SELECT COUNT(*) AS n FROM users');
+const qListUsers      = db.prepare('SELECT id, username, created_at, discord_id FROM users ORDER BY id DESC LIMIT 500');
+const qGetAdmin       = db.prepare('SELECT username FROM admins WHERE username = ?');
+const qListAdmins     = db.prepare('SELECT username, added_at FROM admins ORDER BY added_at');
+const qAddAdmin       = db.prepare('INSERT OR IGNORE INTO admins (username, added_at) VALUES (?,?)');
+const qDelAdmin       = db.prepare('DELETE FROM admins WHERE username = ?');
+const qListBans       = db.prepare('SELECT kind, value, reason, added_at FROM bans ORDER BY added_at DESC');
+const qGetBan         = db.prepare('SELECT kind, value FROM bans WHERE kind = ? AND value = ?');
+const qAddBan         = db.prepare('INSERT OR REPLACE INTO bans (kind, value, reason, added_at) VALUES (?,?,?,?)');
+const qDelBan         = db.prepare('DELETE FROM bans WHERE kind = ? AND value = ?');
+const qBannedUsers    = db.prepare("SELECT value FROM bans WHERE kind = 'user'");
+const qDeleteSessionsByUser = db.prepare('DELETE FROM sessions WHERE user_id = ?');
 
 // clean expired sessions occasionally
 setInterval(() => { try { qDeleteSession.run(Date.now()); } catch {} }, 60 * 60 * 1000);
@@ -435,6 +463,8 @@ async function handleRegister(req, res) {
     let body; try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { message: 'bad request' }); }
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
+    if (qGetBan.get('ip', clientIp(req))) { log(`auth: register blocked — banned ip ${clientIp(req)}`); return json(res, 403, { message: 'banned' }); }
+    if (qGetBan.get('user', username)) { log(`auth: register blocked — banned user "${username}"`); return json(res, 403, { message: 'banned' }); }
     if (username.length < 3 || username.length > 24 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
         logV(`register rejected: bad username "${username}"`);
         return json(res, 400, { message: 'username must be 3-24 chars: letters, numbers, _ . -' });
@@ -452,6 +482,8 @@ async function handleLogin(req, res) {
     let body; try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { message: 'bad request' }); }
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
+    if (qGetBan.get('ip', clientIp(req))) { warn(`auth: login blocked — banned ip ${clientIp(req)}`); return json(res, 403, { message: 'banned' }); }
+    if (qGetBan.get('user', username)) { warn(`auth: login blocked — banned user "${username}"`); return json(res, 403, { message: 'banned' }); }
     const user = qUserByName.get(username);
     if (!user || !verifyPassword(password, user.password_hash)) {
         warn(`auth: failed login for "${username}"`);
@@ -466,6 +498,149 @@ async function handleLogin(req, res) {
         token,
         user: { id: user.id, username: user.username },
     });
+}
+
+// ── Admin panel (/moderator) ────────────────────────────────────────────────
+// Access = RELAY_OWNER (implicit) OR a row in the admins table. The panel page
+// is served at /moderator and talks to /api/admin/* with the viewer's session
+// token as a Bearer header. Bans are enforced on register/login/WS-connect.
+function isRelayAdmin(username) {
+    if (!username) return false;
+    if (RELAY_OWNER && username === RELAY_OWNER) return true;
+    return !!qGetAdmin.get(username);
+}
+function clientIp(req) {
+    return String((req.socket && req.socket.remoteAddress) || '').replace(/^::ffff:/, '');
+}
+function userFromReq(req) {
+    let token = null;
+    const h = String(req.headers['authorization'] || '');
+    if (h.toLowerCase().startsWith('bearer ')) token = h.slice(7).trim();
+    if (!token) { try { token = new URL(req.url, 'http://x').searchParams.get('token') || null; } catch {} }
+    if (!token) return null;
+    const payload = verifyToken(token);
+    const sess = payload ? qFindSession.get(token, Date.now()) : null;
+    return sess ? { id: sess.user_id, username: sess.username } : null;
+}
+function serveModerator(res) {
+    let html;
+    try { html = fs.readFileSync(path.join(PUBLIC_DIR, 'moderator.html')); }
+    catch { res.writeHead(404, { 'Content-Type': 'text/plain' }).end('moderator.html missing'); return; }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' }).end(html);
+}
+
+// Keylog: in-memory ring buffer (served to the panel) + dedicated keylog.log
+// file capturing who pressed/released what, on which console.
+const keylog = [];
+let keylogStream = null;
+function recordKeys(cons, v, pressed, released) {
+    if (!pressed.length && !released.length) return;
+    const entry = { at: Date.now(), user: v.username, console: cons.key, pressed, released };
+    keylog.push(entry);
+    if (keylog.length > 3000) keylog.splice(0, keylog.length - 3000);
+    try {
+        if (!keylogStream) {
+            fs.mkdirSync(path.dirname(path.resolve(KEYLOG_FILE)), { recursive: true });
+            keylogStream = fs.createWriteStream(KEYLOG_FILE, { flags: 'a' });
+            keylogStream.on('error', () => {});
+        }
+        const parts = [];
+        if (pressed.length) parts.push(`pressed [${pressed.join(',')}]`);
+        if (released.length) parts.push(`released [${released.join(',')}]`);
+        keylogStream.write(`[${new Date(entry.at).toISOString()}] user="${entry.user}" console="${entry.console}" ${parts.join(' ')}\n`);
+    } catch {}
+}
+
+async function handleAdminApi(req, res, url) {
+    const user = userFromReq(req);
+    const admin = !!(user && isRelayAdmin(user.username));
+    if (url === '/api/admin/check') {
+        return json(res, 200, { loggedIn: !!user, admin, username: user ? user.username : null, owner: !!(user && RELAY_OWNER && user.username === RELAY_OWNER) });
+    }
+    if (!admin) return json(res, 403, { message: 'no' });
+
+    const route = url.slice('/api/admin/'.length);
+    if (req.method === 'GET' && route === 'panel') {
+        const bannedUsers = new Set(qBannedUsers.all().map((r) => r.value));
+        const consRows = [...consoles.values()].map((c) => ({
+            key: c.key,
+            name: c.name,
+            online: !!c.hostAlive,
+            mode: c.mode || 'anarchy',
+            currentGame: c.currentGame || null,
+            games: (c.games || []).length,
+            viewers: [...c.viewers.values()].map((v) => ({ id: v.id, name: v.username, ip: v.ip || '', joinedAt: v.joinedAt })),
+        }));
+        return json(res, 200, {
+            now: Date.now(),
+            owner: RELAY_OWNER,
+            status: {
+                uptimeSec: Math.round(process.uptime()),
+                consoles: consRows.length,
+                online: consRows.filter((c) => c.online).length,
+                viewers: consRows.reduce((n, c) => n + c.viewers.length, 0),
+                users: qCountUsers.get().n,
+                hostToken: !!HOST_TOKEN,
+                discord: !!(DISCORD_CLIENT_ID && DISCORD_CLIENT_SECRET),
+                logFile: LOG_FILE || '(stdout only)',
+                keylogFile: KEYLOG_FILE || '(disabled)',
+            },
+            consoles: consRows,
+            users: qListUsers.all().map((u) => ({ id: u.id, username: u.username, createdAt: u.created_at, discord: !!u.discord_id, banned: bannedUsers.has(u.username) })),
+            admins: qListAdmins.all(),
+            bans: qListBans.all(),
+            keylog: keylog.slice(-300),
+        });
+    }
+
+    if (req.method !== 'POST') return json(res, 404, { message: 'unknown admin route' });
+    let body; try { body = JSON.parse(await readBody(req)); } catch { return json(res, 400, { message: 'bad request' }); }
+
+    if (route === 'ban' || route === 'unban') {
+        const kind = body.kind === 'ip' ? 'ip' : 'user';
+        const value = String(body.value || '').trim().slice(0, 64);
+        if (!value) return json(res, 400, { message: 'value required' });
+        if (route === 'ban') {
+            const reason = String(body.reason || '').slice(0, 200);
+            qAddBan.run(kind, value, reason, Date.now());
+            if (kind === 'user') {
+                const u = qUserByName.get(value);
+                if (u) qDeleteSessionsByUser.run(u.id);   // kill their tokens now
+            }
+            // Kick any live viewer matching the ban immediately.
+            let kicked = 0;
+            for (const c of consoles.values()) {
+                for (const v of [...c.viewers.values()]) {
+                    if ((kind === 'user' && v.username === value) || (kind === 'ip' && v.ip === value)) {
+                        try { v.ws.close(4003, 'banned'); kicked++; } catch {}
+                        c.viewers.delete(v.id);
+                    }
+                }
+                broadcastRoster(c);
+            }
+            log(`admin: ${user.username} banned ${kind} "${value}"${reason ? ` (${reason})` : ''} — kicked ${kicked} live`);
+            return json(res, 200, { ok: true, kicked });
+        }
+        qDelBan.run(kind, value);
+        log(`admin: ${user.username} unbanned ${kind} "${value}"`);
+        return json(res, 200, { ok: true });
+    }
+
+    if (route === 'addadmin' || route === 'removeadmin') {
+        const value = String(body.username || '').trim().slice(0, 24);
+        if (!/^[A-Za-z0-9_.-]{3,24}$/.test(value)) return json(res, 400, { message: 'bad username' });
+        if (route === 'addadmin') {
+            qAddAdmin.run(value, Date.now());
+            log(`admin: ${user.username} added admin "${value}"`);
+        } else {
+            if (RELAY_OWNER && value === RELAY_OWNER) return json(res, 400, { message: 'cannot remove the owner' });
+            qDelAdmin.run(value);
+            log(`admin: ${user.username} removed admin "${value}"`);
+        }
+        return json(res, 200, { ok: true });
+    }
+
+    return json(res, 404, { message: 'unknown admin route' });
 }
 
 // ── Discord Activity auth ──────────────────────────────────────────────────
@@ -602,6 +777,8 @@ const server = http.createServer(async (req, res) => {
         if (url === '/api/register') return handleRegister(req, res);
         if (url === '/api/login') return handleLogin(req, res);
         if (url === '/api/discord/auth') return handleDiscordAuth(req, res);
+        if (url === '/moderator') return serveModerator(res);
+        if (url.startsWith('/api/admin/')) return handleAdminApi(req, res, url);
         if (url === '/api/consoles') {
             // Auth optional for browsing; only listing public metadata.
             return json(res, 200, consoleGridToClient());
@@ -641,10 +818,12 @@ server.on('upgrade', (req, socket, head) => {
     // Viewers must present a signed session token.
     let user = null;
     if (url === '/stream') {
+        if (qGetBan.get('ip', clientIp(req))) { warn(`ws: viewer connect blocked — banned ip ${clientIp(req)}`); socket.destroy(); return; }
         const token = params.get('token') || '';
         const payload = verifyToken(token);
         const sess = payload ? qFindSession.get(token, Date.now()) : null;
         if (sess) {
+            if (qGetBan.get('user', sess.username)) { warn(`ws: viewer connect blocked — banned user "${sess.username}"`); socket.destroy(); return; }
             user = { id: sess.user_id, username: sess.username };
         } else {
             // Guest mode for local LAN testing without an account.
@@ -655,7 +834,7 @@ server.on('upgrade', (req, socket, head) => {
 
     wss.handleUpgrade(req, socket, head, (ws) => {
         if (url === '/host') attachHost(ws, params.get('console') || '');
-        else attachViewer(ws, params.get('console') || '', user);
+        else attachViewer(ws, params.get('console') || '', user, clientIp(req));
     });
 });
 
@@ -853,7 +1032,7 @@ function removeConsole(cons) {
 // ── Viewer side ─────────────────────────────────────────────────────────────
 const nextViewerId = (() => { let n = 0; return () => `v${++n}`; })();
 
-function attachViewer(ws, consoleParam, user) {
+function attachViewer(ws, consoleParam, user, ip) {
     const cons = resolveConsole(consoleParam);
     if (!cons) {
         logV(`viewer: rejected — unknown console "${consoleParam}"`);
@@ -873,13 +1052,14 @@ function attachViewer(ws, consoleParam, user) {
         ws,
         username: user.username || 'Guest',
         userId: user.id,
+        ip: ip || '',
         keys: new Set(),
         keysAt: 0,
         lastChat: 0,
         joinedAt: Date.now(),
     };
     cons.viewers.set(v.id, v);
-    log(`viewer "${v.username}" (${v.id}) joined console "${cons.key}" (${cons.viewers.size} online)`);
+    log(`viewer "${v.username}" (${v.id}) joined console "${cons.key}" from ${v.ip || '?'} (${cons.viewers.size} online)`);
 
     const motdText = (cons.motd || '').replace(/\$user|\{user\}/gi, v.username);
     if (motdText && motdText.trim()) {
@@ -950,6 +1130,7 @@ function handleViewerMsg(cons, v, msg) {
             const released = [...v.keys].filter((k) => !next.has(k));
             v.keys = next;
             v.keysAt = Date.now();
+            recordKeys(cons, v, pressed, released);
             if (pressed.length) log(`key: ${v.username} (${v.id}) pressed [${pressed.join(',')}] on "${cons.key}"`);
             if (released.length) log(`key: ${v.username} (${v.id}) released [${released.join(',')}] on "${cons.key}"`);
             // Low-latency path: a viewer changed its keys, so forward the merge to
