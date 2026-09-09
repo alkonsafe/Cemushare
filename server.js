@@ -1020,7 +1020,11 @@ function attachHost(ws, consoleParam) {
                     broadcastJson(cons, { t: 'aconfig', config: cons.audioConfig });
                 }
                 else if (msg.t === 'gamestate') {
+                    const was = cons.currentGame;
                     cons.currentGame = (msg.state && msg.state.game) || null;
+                    // The game that was just switched to got closed (exit/crash):
+                    // lift the vote cooldown so the next vote can start right away.
+                    if (was && !cons.currentGame) cons.gameVoteCooldownUntil = 0;
                     broadcastJson(cons, { t: 'gamestate', state: msg.state });
                     if (cons.games.length) broadcastJson(cons, { t: 'games', games: cons.games, current: cons.currentGame });
                 }
