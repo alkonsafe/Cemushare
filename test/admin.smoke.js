@@ -1,5 +1,8 @@
 // Smoke test: RELAY_OWNER panel access, keylog, bans.
 const { spawn } = require('child_process');
+const fs = require('fs');
+// Fresh DB every run (the ban tests leave bans behind by design).
+for (const f of fs.readdirSync('data')) if (f.startsWith('test-admin.db')) fs.rmSync('data/' + f, { force: true });
 
 const PORT = 8099;
 const srv = spawn('node', ['server.js'], {

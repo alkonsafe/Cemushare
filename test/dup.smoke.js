@@ -1,5 +1,7 @@
 // Duplicate-client rejection: 2nd tab same user+console gets bounced.
 const { spawn } = require('child_process');
+const fs = require('fs');
+for (const f of fs.readdirSync('data')) if (f.startsWith('test-dup.db')) fs.rmSync('data/' + f, { force: true });
 const WebSocket = require('ws');
 const PORT = 8096;
 const srv = spawn('node', ['server.js'], {

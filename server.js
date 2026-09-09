@@ -85,13 +85,35 @@ function writeLog(line) {
         logStream.write(line + '\n');
     } catch {}
 }
+// stdout batching: console.log is a synchronous syscall when stdout is a TTY or
+// a file, and a paused/stalled reader (Ctrl+S in the terminal, frozen SSH
+// scrollback, a full pipe) blocks EVERY log line — and with it, the whole relay.
+// So: info/verbose lines are batched and flushed at most every 150ms, and if
+// the reader falls badly behind we DROP the backlog instead of freezing.
+const OUT_FLUSH_MS = 150;
+const OUT_MAX_BACKLOG = 1 * 1024 * 1024;   // ~1MB unread → reader is stuck, drop
+let outBuf = [];
+let outTimer = null;
+function flushStdout() {
+    outTimer = null;
+    if (!outBuf.length) return;
+    const text = outBuf.join('');
+    outBuf = [];
+    if (process.stdout && process.stdout.writableLength > OUT_MAX_BACKLOG) return;
+    try { process.stdout.write(text); } catch {}
+}
+function queueStdout(line) {
+    outBuf.push(line + '\n');
+    if (!outTimer) { outTimer = setTimeout(flushStdout, OUT_FLUSH_MS); if (outTimer.unref) outTimer.unref(); }
+}
 function logAt(level, ...a) {
     if ((LEVELS[level] || 1) < (LEVELS[LOG_INFO] || 1)) return;
     const line = `[${new Date().toISOString()}] [${String(level).toUpperCase().padEnd(7)}] ` + util.format(...a);
-    const fn = level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
-    fn(line);
+    // warn/error go out immediately (they matter more than batching).
+    try { (level === 'error' ? console.error : level === 'warn' ? console.warn : queueStdout)(line); } catch {}
     writeLog(line);
 }
+process.on('exit', () => { if (outBuf.length) { try { process.stdout.write(outBuf.join('')); } catch {} outBuf = []; } });
 const log   = (...a) => logAt('info', ...a);
 const logV  = (...a) => logAt('verbose', ...a);   // noisiest: per-message / per-frame
 const warn  = (...a) => logAt('warn', ...a);

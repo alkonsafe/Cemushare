@@ -1,5 +1,7 @@
 // Verify clientIp: loopback + CF-Connecting-IP header → header IP used.
 const { spawn } = require('child_process');
+const fs = require('fs');
+for (const f of fs.readdirSync('data')) if (f.startsWith('test-ip.db')) fs.rmSync('data/' + f, { force: true });
 const PORT = 8098;
 const srv = spawn('node', ['server.js'], {
     env: { ...process.env, EMULATOR_PORT: String(PORT), EMULATOR_HOST_TOKEN: 'tok-t', RELAY_OWNER: 'boss', EMULATOR_DB: 'data/test-ip.db', EMULATOR_LOG: 'error' },

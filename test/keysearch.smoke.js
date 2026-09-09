@@ -1,5 +1,7 @@
 // keysearch: user types c,o,r,(shift),n with breaks -> word "corn" matches.
 const { spawn } = require('child_process');
+const fs = require('fs');
+for (const f of fs.readdirSync('data')) if (f.startsWith('test-ks.db')) fs.rmSync('data/' + f, { force: true });
 const WebSocket = require('ws');
 const PORT = 8095;
 const srv = spawn('node', ['server.js'], {

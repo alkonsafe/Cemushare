@@ -849,12 +849,33 @@ function writeLog(line) {
         logStream.write(line + '\n');
     } catch {}
 }
+// Batch stdout like the relay does: console.log is sync on TTY/file, and a
+// paused terminal (Ctrl+S, frozen SSH scrollback) would stall the host loop —
+// including key input replay and capture management. Flush every 150ms, drop
+// the backlog if the reader is stuck.
+const OUT_FLUSH_MS = 150;
+const OUT_MAX_BACKLOG = 1 * 1024 * 1024;
+let outBuf = [];
+let outTimer = null;
+function flushStdout() {
+    outTimer = null;
+    if (!outBuf.length) return;
+    const text = outBuf.join('');
+    outBuf = [];
+    if (process.stdout && process.stdout.writableLength > OUT_MAX_BACKLOG) return;
+    try { process.stdout.write(text); } catch {}
+}
+function queueStdout(line) {
+    outBuf.push(line + '\n');
+    if (!outTimer) { outTimer = setTimeout(flushStdout, OUT_FLUSH_MS); if (outTimer.unref) outTimer.unref(); }
+}
 function logAt(level, ...a) {
     if (({ verbose: 0, info: 1 }[level] || 1) < ({ verbose: 0, info: 1 }[LOG] || 1)) return;
     const line = util.format(...a);
-    console.log('[full]', line);
+    try { (level === 'error' || level === 'warn' ? console.error : queueStdout)(line); } catch {}
     writeLog(`[${new Date().toISOString()}] [full] ${line}`);
 }
+process.on('exit', () => { if (outBuf.length) { try { process.stdout.write(outBuf.join('')); } catch {} outBuf = []; } });
 const log  = (...a) => logAt('info', ...a);
 const logV = (...a) => logAt('verbose', ...a);
 log(`logging to file: ${path.resolve(LOG_FILE)}`);
