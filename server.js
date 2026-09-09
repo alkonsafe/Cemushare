@@ -28,7 +28,6 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const util = require('util');
-const Database = require('better-sqlite3');
 const { WebSocketServer } = require('ws');
 
 // ── .env autoload ────────────────────────────────────────────────────────────
@@ -170,102 +169,41 @@ function authRateLimited(req, route) {
     return false;
 }
 
-// ── SQLite ───────────────────────────────────────────────────────────────────
+// ── SQLite (in a worker thread) ──────────────────────────────────────────────
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(SHOTS_DIR, { recursive: true });
-fs.mkdirSync(path.dirname(DB_PATH), { recursive: true });
-const db = new Database(DB_PATH);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    username      TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at    INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS sessions (
-    token      TEXT PRIMARY KEY,
-    user_id    INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS consoles (
-    key         TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    image       TEXT,
-    category    TEXT,
-    description TEXT,
-    created_at  INTEGER NOT NULL,
-    updated_at  INTEGER NOT NULL,
-    last_seen   INTEGER
-  );
-  CREATE TABLE IF NOT EXISTS admins (
-    username TEXT PRIMARY KEY,
-    added_at INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS bans (
-    kind     TEXT NOT NULL,
-    value    TEXT NOT NULL,
-    reason   TEXT,
-    added_at INTEGER NOT NULL,
-    PRIMARY KEY (kind, value)
-  );
-`);
-
-// Discord-linked accounts: add column to existing DBs, index non-null rows only.
-const userCols = db.prepare('PRAGMA table_info(users)').all();
-if (!userCols.some((c) => c.name === 'discord_id')) {
-    db.exec('ALTER TABLE users ADD COLUMN discord_id TEXT');
+// better-sqlite3 is synchronous — every .get/.run stalled the event loop. The
+// whole DB now lives in bin/db-worker.js; the relay talks to it over
+// message-passing RPC and awaits the result. Call sites: await dbq(op, stmt, params).
+const { Worker } = require('worker_threads');
+const dbWorker = new Worker(path.join(__dirname, 'bin', 'db-worker.js'), { workerData: { dbPath: DB_PATH } });
+dbWorker.unref();
+let dbSeq = 0;
+const dbPending = new Map();
+dbWorker.on('message', (m) => {
+    const p = dbPending.get(m.id);
+    if (!p) return;
+    dbPending.delete(m.id);
+    if (m.ok) p.resolve(m.result);
+    else p.reject(new Error(m.error));
+});
+dbWorker.on('error', (e) => error(`db worker crashed: ${e.message}`));
+dbWorker.on('exit', (code) => {
+    error(`db worker exited (code=${code}) — rejecting ${dbPending.size} pending db call(s)`);
+    for (const p of dbPending.values()) p.reject(new Error('db worker exited'));
+    dbPending.clear();
+});
+function dbq(op, stmt, params = []) {
+    return new Promise((resolve, reject) => {
+        const id = ++dbSeq;
+        dbPending.set(id, { resolve, reject });
+        dbWorker.postMessage({ id, op, stmt, params });
+    });
 }
-db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_users_discord_id ON users(discord_id) WHERE discord_id IS NOT NULL');
-// Last IP we saw this user connect from (tunnel-resolved), for the admin panel.
-if (!userCols.some((c) => c.name === 'last_ip')) {
-    db.exec('ALTER TABLE users ADD COLUMN last_ip TEXT');
-}
-
-const qUserByName     = db.prepare('SELECT * FROM users WHERE username = ?');
-const qUserById       = db.prepare('SELECT * FROM users WHERE id = ?');
-const qUserByDiscord  = db.prepare('SELECT * FROM users WHERE discord_id = ?');
-const qCreateUser     = db.prepare('INSERT INTO users (username, password_hash, created_at) VALUES (?,?,?)');
-const qCreateDiscordUser = db.prepare('INSERT INTO users (username, password_hash, created_at, discord_id) VALUES (?,?,?,?)');
-const qInsertSession  = db.prepare('INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)');
-const qDeleteSession  = db.prepare('DELETE FROM sessions WHERE expires_at <= ?');
-const qFindSession    = db.prepare('SELECT s.*, u.username FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ? AND s.expires_at > ?');
-
-const qUpsertConsole  = db.prepare(`
-  INSERT INTO consoles (key, name, image, category, description, created_at, updated_at, last_seen)
-  VALUES (@key, @name, @image, @category, @description, @created_at, @updated_at, @last_seen)
-  ON CONFLICT(key) DO UPDATE SET
-    name = excluded.name,
-    image = excluded.image,
-    category = excluded.category,
-    description = excluded.description,
-    updated_at = excluded.updated_at,
-    last_seen = excluded.last_seen
-`);
-const qTouchConsole   = db.prepare('UPDATE consoles SET last_seen = ? WHERE key = ?');
-const qListConsoles   = db.prepare('SELECT * FROM consoles ORDER BY updated_at DESC');
-const qDeleteConsole  = db.prepare('DELETE FROM consoles WHERE key = ?');
-const qSetImage       = db.prepare('UPDATE consoles SET image = ?, updated_at = ? WHERE key = ?');
-
-const qCountUsers     = db.prepare('SELECT COUNT(*) AS n FROM users');
-const qListUsers      = db.prepare('SELECT id, username, created_at, discord_id FROM users ORDER BY id DESC LIMIT 500');
-const qGetAdmin       = db.prepare('SELECT username FROM admins WHERE username = ?');
-const qListAdmins     = db.prepare('SELECT username, added_at FROM admins ORDER BY added_at');
-const qAddAdmin       = db.prepare('INSERT OR IGNORE INTO admins (username, added_at) VALUES (?,?)');
-const qDelAdmin       = db.prepare('DELETE FROM admins WHERE username = ?');
-const qListBans       = db.prepare('SELECT kind, value, reason, added_at FROM bans ORDER BY added_at DESC');
-const qGetBan         = db.prepare('SELECT kind, value FROM bans WHERE kind = ? AND value = ?');
-const qAddBan         = db.prepare('INSERT OR REPLACE INTO bans (kind, value, reason, added_at) VALUES (?,?,?,?)');
-const qDelBan         = db.prepare('DELETE FROM bans WHERE kind = ? AND value = ?');
-const qBannedUsers    = db.prepare("SELECT value FROM bans WHERE kind = 'user'");
-const qDeleteSessionsByUser = db.prepare('DELETE FROM sessions WHERE user_id = ?');
-const qSetUserIp     = db.prepare('UPDATE users SET last_ip = ? WHERE id = ?');
+function dbfire(op, stmt, params = []) { dbq(op, stmt, params).catch((e) => warn(`db: ${stmt} failed: ${e.message}`)); }
 
 // clean expired sessions occasionally
-setInterval(() => { try { qDeleteSession.run(Date.now()); } catch {} }, 60 * 60 * 1000);
+setInterval(() => { dbfire('run', 'deleteSession', [Date.now()]); }, 60 * 60 * 1000);
 
 // ── Password hashing (scrypt, async off the event loop) ─────────────────────
 // crypto.scryptSync used to block the whole relay ~50-100ms per attempt (every
@@ -330,7 +268,7 @@ function resolveConsole(id) {
     return consoles.get(id) || [...consoles.values()].find((c) => c.name === id) || null;
 }
 
-function registerConsole(meta) {
+async function registerConsole(meta) {
     const key = String(meta && meta.key || '').trim().toLowerCase().slice(0, 48);
     if (!key) return null;
     const now = Date.now();
@@ -339,7 +277,7 @@ function registerConsole(meta) {
         category: String(meta && meta.category || '').slice(0, 64),
         description: String(meta && meta.description || '').slice(0, 300),
         created_at: now, updated_at: now, last_seen: now };
-    qUpsertConsole.run(row);
+    await dbq('run', 'upsertConsole', [row]);
     if (!consoles.has(key)) {
         consoles.set(key, makeConsoleState(key, row.name));
     }
@@ -506,16 +444,16 @@ async function handleRegister(req, res) {
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
     const ip = clientIp(req);
-    if (qGetBan.get('ip', ip)) { log(`auth: register blocked — banned ip ${ip}`); return json(res, 403, { message: 'banned' }); }
-    if (qGetBan.get('user', username)) { log(`auth: register blocked — banned user "${username}"`); return json(res, 403, { message: 'banned' }); }
+    if (await dbq('get', 'getBan', ['ip', ip])) { log(`auth: register blocked — banned ip ${ip}`); return json(res, 403, { message: 'banned' }); }
+    if (await dbq('get', 'getBan', ['user', username])) { log(`auth: register blocked — banned user "${username}"`); return json(res, 403, { message: 'banned' }); }
     if (username.length < 3 || username.length > 24 || !/^[A-Za-z0-9_.-]+$/.test(username)) {
         logV(`register rejected: bad username "${username}"`);
         return json(res, 400, { message: 'username must be 3-24 chars: letters, numbers, _ . -' });
     }
     if (password.length < 6) { logV(`register rejected: short password for "${username}"`); return json(res, 400, { message: 'password must be at least 6 characters' }); }
-    if (qUserByName.get(username)) { logV(`register rejected: username taken "${username}"`); return json(res, 409, { message: 'username already taken' }); }
-    const info = qCreateUser.run(username, await hashPassword(password), Date.now());
-    qSetUserIp.run(ip, Number(info.lastInsertRowid));
+    if (await dbq('get', 'userByName', [username])) { logV(`register rejected: username taken "${username}"`); return json(res, 409, { message: 'username already taken' }); }
+    const info = await dbq('run', 'createUser', [username, await hashPassword(password), Date.now()]);
+    await dbq('run', 'setUserIp', [ip, Number(info.lastInsertRowid)]);
     log(`auth: new account "${username}" created from ${ip}`);
     return json(res, 200, { message: 'registered' });
 }
@@ -527,18 +465,18 @@ async function handleLogin(req, res) {
     const username = String(body.username || '').trim();
     const password = String(body.password || '');
     const ip = clientIp(req);
-    if (qGetBan.get('ip', ip)) { warn(`auth: login blocked — banned ip ${ip}`); return json(res, 403, { message: 'banned' }); }
-    if (qGetBan.get('user', username)) { warn(`auth: login blocked — banned user "${username}"`); return json(res, 403, { message: 'banned' }); }
-    const user = qUserByName.get(username);
+    if (await dbq('get', 'getBan', ['ip', ip])) { warn(`auth: login blocked — banned ip ${ip}`); return json(res, 403, { message: 'banned' }); }
+    if (await dbq('get', 'getBan', ['user', username])) { warn(`auth: login blocked — banned user "${username}"`); return json(res, 403, { message: 'banned' }); }
+    const user = await dbq('get', 'userByName', [username]);
     if (!user || !(await verifyPassword(password, user.password_hash))) {
         warn(`auth: failed login for "${username}"`);
         return json(res, 401, { message: 'invalid username or password' });
     }
-    qSetUserIp.run(ip, user.id);
+    await dbq('run', 'setUserIp', [ip, user.id]);
 
     const ttl = 14 * 24 * 60 * 60 * 1000; // 14 days
     const token = makeToken({ sub: user.id, username: user.username }, ttl);
-    qInsertSession.run(token, user.id, Date.now(), Date.now() + ttl);
+    await dbq('run', 'insertSession', [token, user.id, Date.now(), Date.now() + ttl]);
     log(`auth: "${user.username}" logged in (id=${user.id})`);
     return json(res, 200, {
         token,
@@ -550,10 +488,10 @@ async function handleLogin(req, res) {
 // Access = RELAY_OWNER (implicit) OR a row in the admins table. The panel page
 // is served at /moderator and talks to /api/admin/* with the viewer's session
 // token as a Bearer header. Bans are enforced on register/login/WS-connect.
-function isRelayAdmin(username) {
+async function isRelayAdmin(username) {
     if (!username) return false;
     if (RELAY_OWNER && username === RELAY_OWNER) return true;
-    return !!qGetAdmin.get(username);
+    return !!(await dbq('get', 'getAdmin', [username]));
 }
 // Real client IP. Behind a reverse proxy / cloudflared tunnel every socket is
 // local (127.0.0.1), so when the peer is loopback/private we read the IP from
@@ -576,14 +514,14 @@ function clientIp(req) {
     }
     return direct;
 }
-function userFromReq(req) {
+async function userFromReq(req) {
     let token = null;
     const h = String(req.headers['authorization'] || '');
     if (h.toLowerCase().startsWith('bearer ')) token = h.slice(7).trim();
     if (!token) { try { token = new URL(req.url, 'http://x').searchParams.get('token') || null; } catch {} }
     if (!token) return null;
     const payload = verifyToken(token);
-    const sess = payload ? qFindSession.get(token, Date.now()) : null;
+    const sess = payload ? await dbq('get', 'findSession', [token, Date.now()]) : null;
     return sess ? { id: sess.user_id, username: sess.username } : null;
 }
 // moderator.html cached in memory (re-read only when the file changes on disk);
@@ -676,8 +614,8 @@ function searchKeylog(userQ, wordQ) {
 }
 
 async function handleAdminApi(req, res, url) {
-    const user = userFromReq(req);
-    const admin = !!(user && isRelayAdmin(user.username));
+    const user = await userFromReq(req);
+    const admin = !!(user && await isRelayAdmin(user.username));
     if (url === '/api/admin/check') {
         return json(res, 200, { loggedIn: !!user, admin, username: user ? user.username : null, owner: !!(user && RELAY_OWNER && user.username === RELAY_OWNER) });
     }
@@ -689,7 +627,14 @@ async function handleAdminApi(req, res, url) {
         return json(res, 200, searchKeylog(params.get('user'), params.get('word')));
     }
     if (req.method === 'GET' && route === 'panel') {
-        const bannedUsers = new Set(qBannedUsers.all().map((r) => r.value));
+        const [bannedRows, userRows, adminRows, banRows, countRow] = await Promise.all([
+            dbq('all', 'bannedUsers', []),
+            dbq('all', 'listUsers', []),
+            dbq('all', 'listAdmins', []),
+            dbq('all', 'listBans', []),
+            dbq('get', 'countUsers', []),
+        ]);
+        const bannedUsers = new Set(bannedRows.map((r) => r.value));
         const consRows = [...consoles.values()].map((c) => ({
             key: c.key,
             name: c.name,
@@ -707,16 +652,16 @@ async function handleAdminApi(req, res, url) {
                 consoles: consRows.length,
                 online: consRows.filter((c) => c.online).length,
                 viewers: consRows.reduce((n, c) => n + c.viewers.length, 0),
-                users: qCountUsers.get().n,
+                users: countRow.n,
                 hostToken: !!HOST_TOKEN,
                 discord: !!(DISCORD_CLIENT_ID && DISCORD_CLIENT_SECRET),
                 logFile: LOG_FILE || '(stdout only)',
                 keylogFile: KEYLOG_FILE || '(disabled)',
             },
             consoles: consRows,
-            users: qListUsers.all().map((u) => ({ id: u.id, username: u.username, createdAt: u.created_at, discord: !!u.discord_id, ip: u.last_ip || '', banned: bannedUsers.has(u.username) })),
-            admins: qListAdmins.all(),
-            bans: qListBans.all(),
+            users: userRows.map((u) => ({ id: u.id, username: u.username, createdAt: u.created_at, discord: !!u.discord_id, ip: u.last_ip || '', banned: bannedUsers.has(u.username) })),
+            admins: adminRows,
+            bans: banRows,
             keylog: keylog.slice(-300),
         });
     }
@@ -730,10 +675,10 @@ async function handleAdminApi(req, res, url) {
         if (!value) return json(res, 400, { message: 'value required' });
         if (route === 'ban') {
             const reason = String(body.reason || '').slice(0, 200);
-            qAddBan.run(kind, value, reason, Date.now());
+            await dbq('run', 'addBan', [kind, value, reason, Date.now()]);
             if (kind === 'user') {
-                const u = qUserByName.get(value);
-                if (u) qDeleteSessionsByUser.run(u.id);   // kill their tokens now
+                const u = await dbq('get', 'userByName', [value]);
+                if (u) await dbq('run', 'deleteSessionsByUser', [u.id]);   // kill their tokens now
             }
             // Kick any live viewer matching the ban immediately.
             let kicked = 0;
@@ -749,7 +694,7 @@ async function handleAdminApi(req, res, url) {
             log(`admin: ${user.username} banned ${kind} "${value}"${reason ? ` (${reason})` : ''} — kicked ${kicked} live`);
             return json(res, 200, { ok: true, kicked });
         }
-        qDelBan.run(kind, value);
+        await dbq('run', 'delBan', [kind, value]);
         log(`admin: ${user.username} unbanned ${kind} "${value}"`);
         return json(res, 200, { ok: true });
     }
@@ -758,11 +703,11 @@ async function handleAdminApi(req, res, url) {
         const value = String(body.username || '').trim().slice(0, 24);
         if (!/^[A-Za-z0-9_.-]{3,24}$/.test(value)) return json(res, 400, { message: 'bad username' });
         if (route === 'addadmin') {
-            qAddAdmin.run(value, Date.now());
+            await dbq('run', 'addAdmin', [value, Date.now()]);
             log(`admin: ${user.username} added admin "${value}"`);
         } else {
             if (RELAY_OWNER && value === RELAY_OWNER) return json(res, 400, { message: 'cannot remove the owner' });
-            qDelAdmin.run(value);
+            await dbq('run', 'delAdmin', [value]);
             log(`admin: ${user.username} removed admin "${value}"`);
         }
         return json(res, 200, { ok: true });
@@ -804,16 +749,16 @@ function sanitizeDiscordUsername(raw) {
     return u || 'player';
 }
 
-function makeUniqueUsername(base, discordId) {
-    if (!qUserByName.get(base)) return base;
+async function makeUniqueUsername(base, discordId) {
+    if (!(await dbq('get', 'userByName', [base]))) return base;
     const digits = String(discordId).replace(/\D/g, '');
     const idSuffix = digits.slice(-4) || crypto.randomBytes(2).toString('hex');
     const cand = `${base.slice(0, 19)}_${idSuffix}`;
-    if (!qUserByName.get(cand)) return cand;
+    if (!(await dbq('get', 'userByName', [cand]))) return cand;
     for (let n = 2; n < 10000; n++) {
         const s = String(n);
         const c = `${base.slice(0, 24 - s.length - 1)}_${s}`;
-        if (c.length >= 3 && !qUserByName.get(c)) return c;
+        if (c.length >= 3 && !(await dbq('get', 'userByName', [c]))) return c;
     }
     return `${base.slice(0, 21)}_${crypto.randomBytes(2).toString('hex')}`;
 }
@@ -873,17 +818,17 @@ async function handleDiscordAuth(req, res) {
     }
 
     const discordId = String(discordUser.id);
-    let user = qUserByDiscord.get(discordId);
+    let user = await dbq('get', 'userByDiscord', [discordId]);
     if (!user) {
-        const username = makeUniqueUsername(sanitizeDiscordUsername(discordUser.username), discordId);
-        const info = qCreateDiscordUser.run(username, await hashPassword(crypto.randomBytes(24).toString('hex')), Date.now(), discordId);
-        user = qUserById.get(Number(info.lastInsertRowid));
+        const username = await makeUniqueUsername(sanitizeDiscordUsername(discordUser.username), discordId);
+        const info = await dbq('run', 'createDiscordUser', [username, await hashPassword(crypto.randomBytes(24).toString('hex')), Date.now(), discordId]);
+        user = await dbq('get', 'userById', [Number(info.lastInsertRowid)]);
         log(`auth: "${username}" auto-registered via Discord (discord_id=${discordId})`);
     }
 
     const ttl = 14 * 24 * 60 * 60 * 1000;
     const token = makeToken({ sub: user.id, username: user.username }, ttl);
-    qInsertSession.run(token, user.id, Date.now(), Date.now() + ttl);
+    await dbq('run', 'insertSession', [token, user.id, Date.now(), Date.now() + ttl]);
     log(`auth: "${user.username}" logged in via Discord (id=${user.id})`);
     return json(res, 200, {
         token,
@@ -892,8 +837,8 @@ async function handleDiscordAuth(req, res) {
     });
 }
 
-function consoleGridToClient() {
-    const rows = qListConsoles.all();
+async function consoleGridToClient() {
+    const rows = await dbq('all', 'listConsoles', []);
     return { consoles: rows.map(publicConsole) };
 }
 
@@ -909,7 +854,7 @@ const server = http.createServer(async (req, res) => {
         if (url.startsWith('/api/admin/')) return handleAdminApi(req, res, url);
         if (url === '/api/consoles') {
             // Auth optional for browsing; only listing public metadata.
-            return json(res, 200, consoleGridToClient());
+            return json(res, 200, await consoleGridToClient());
         }
         if (url === '/api/health') {
             const online = [...consoles.values()].filter((c) => c.hostAlive).length;
@@ -930,6 +875,12 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MEDIA_FRAME });
 
 server.on('upgrade', (req, socket, head) => {
+    handleUpgrade(req, socket, head).catch((err) => {
+        error(`ws upgrade failed: ${err.message}`);
+        try { socket.destroy(); } catch {}
+    });
+});
+async function handleUpgrade(req, socket, head) {
     const url = (req.url || '').split('?')[0];
     const params = new URL(req.url, 'http://x').searchParams;
     if (url !== '/host' && url !== '/stream') { socket.destroy(); return; }
@@ -947,14 +898,14 @@ server.on('upgrade', (req, socket, head) => {
     let user = null;
     if (url === '/stream') {
         const ip = clientIp(req);
-        if (qGetBan.get('ip', ip)) { warn(`ws: viewer connect blocked — banned ip ${ip}`); socket.destroy(); return; }
+        if (await dbq('get', 'getBan', ['ip', ip])) { warn(`ws: viewer connect blocked — banned ip ${ip}`); socket.destroy(); return; }
         const token = params.get('token') || '';
         const payload = verifyToken(token);
-        const sess = payload ? qFindSession.get(token, Date.now()) : null;
+        const sess = payload ? await dbq('get', 'findSession', [token, Date.now()]) : null;
         if (sess) {
-            if (qGetBan.get('user', sess.username)) { warn(`ws: viewer connect blocked — banned user "${sess.username}"`); socket.destroy(); return; }
+            if (await dbq('get', 'getBan', ['user', sess.username])) { warn(`ws: viewer connect blocked — banned user "${sess.username}"`); socket.destroy(); return; }
             user = { id: sess.user_id, username: sess.username };
-            qSetUserIp.run(ip, sess.user_id);   // keep their last-known ip fresh
+            await dbq('run', 'setUserIp', [ip, sess.user_id]);   // keep their last-known ip fresh
         } else {
             // Guest mode for local LAN testing without an account.
             if (process.env.EMULATOR_ALLOW_GUEST === '1') user = { id: null, username: 'Guest' };
@@ -962,11 +913,14 @@ server.on('upgrade', (req, socket, head) => {
         }
     }
 
-    wss.handleUpgrade(req, socket, head, (ws) => {
-        if (url === '/host') attachHost(ws, params.get('console') || '');
-        else attachViewer(ws, params.get('console') || '', user, url === '/stream' ? clientIp(req) : '');
+    await new Promise((resolve) => {
+        wss.handleUpgrade(req, socket, head, (ws) => {
+            if (url === '/host') attachHost(ws, params.get('console') || '');
+            else attachViewer(ws, params.get('console') || '', user, url === '/stream' ? clientIp(req) : '');
+            resolve();
+        });
     });
-});
+}
 
 // ── Host side ───────────────────────────────────────────────────────────────
 function attachHost(ws, consoleParam) {
@@ -1028,27 +982,29 @@ function attachHost(ws, consoleParam) {
                 const meta = msg.console || {};
                 if (meta.key) consoleKey = String(meta.key).toLowerCase().slice(0, 48);
                 const wasOnline = cons && cons.hostAlive;
-                cons = registerConsole({ ...meta, key: consoleKey, last_seen: Date.now() });
-                if (!cons) return;
-                cons.name = meta.name || consoleKey;
-                cons.motd = String(meta.motd || '').slice(0, CHAT_MAX_LEN).trim() || 'Welcome, $user!';
-                if (cons.hostSock !== ws) {
-                    if (cons.hostSock) { try { cons.hostSock.close(4000, 'replaced'); } catch {} }
-                    cons.hostSock = ws;
-                    cons.hostAlive = true;
-                    cons.lastSentKeys = '';
-                    cons.lastVideoAt = Date.now();
-                }
-                sawRegister = true; sawFirstFrame = false;
-                if (!wasOnline) log(`host "${cons.name}" (${consoleKey}): connected & registered, waiting for stream`);
-                else log(`host "${cons.name}" (${consoleKey}): re-registered (was already online)`);
-                qTouchConsole.run(Date.now(), consoleKey);
-                if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'registered', key: consoleKey, name: cons.name }));
-                cons.games = sanitizeGameList(meta.games);
-                if (cons.games.length) {
-                    log(`games: "${cons.key}" advertises ${cons.games.length} launchable game(s)`);
-                    broadcastJson(cons, { t: 'games', games: cons.games, current: cons.currentGame });
-                }
+                registerConsole({ ...meta, key: consoleKey, last_seen: Date.now() }).then((registered) => {
+                    if (!registered) return;
+                    cons = registered;
+                    cons.name = meta.name || consoleKey;
+                    cons.motd = String(meta.motd || '').slice(0, CHAT_MAX_LEN).trim() || 'Welcome, $user!';
+                    if (cons.hostSock !== ws) {
+                        if (cons.hostSock) { try { cons.hostSock.close(4000, 'replaced'); } catch {} }
+                        cons.hostSock = ws;
+                        cons.hostAlive = true;
+                        cons.lastSentKeys = '';
+                        cons.lastVideoAt = Date.now();
+                    }
+                    sawRegister = true; sawFirstFrame = false;
+                    if (!wasOnline) log(`host "${cons.name}" (${consoleKey}): connected & registered, waiting for stream`);
+                    else log(`host "${cons.name}" (${consoleKey}): re-registered (was already online)`);
+                    dbfire('run', 'touchConsole', [Date.now(), consoleKey]);
+                    if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'registered', key: consoleKey, name: cons.name }));
+                    cons.games = sanitizeGameList(meta.games);
+                    if (cons.games.length) {
+                        log(`games: "${cons.key}" advertises ${cons.games.length} launchable game(s)`);
+                        broadcastJson(cons, { t: 'games', games: cons.games, current: cons.currentGame });
+                    }
+                }).catch((e) => error(`host register failed: ${e.message}`));
                 break;
             }
             default:
@@ -1081,7 +1037,7 @@ function attachHost(ws, consoleParam) {
             const wasStreaming = sawFirstFrame;
             log(`host "${cons.key}": disconnected${wasStreaming ? ' (was streaming)' : ''}`);
             broadcastJson(cons, { t: 'host', up: false });
-            qTouchConsole.run(Date.now(), cons.key);
+            dbfire('run', 'touchConsole', [Date.now(), cons.key]);
         }
     });
     ws.on('error', () => {});
@@ -1139,7 +1095,7 @@ function handleShot(cons, payload) {
         try {
             await fs.promises.writeFile(file, payload);
             const url = `/shots/${path.basename(file)}`;
-            qSetImage.run(url, Date.now(), cons.key);
+            await dbq('run', 'setImage', [url, Date.now(), cons.key]);
             log(`shot: updated ${cons.key} thumbnail -> ${url} (${payload.length} bytes)`);
         } catch (err) {
             warn(`shot: failed to store ${file}: ${err.message}`);
@@ -1152,7 +1108,7 @@ function handleShot(cons, payload) {
 // Drop every trace of a console that has gone away: live state (which detaches
 // its host socket + kicks its viewers) and its DB row.
 function removeConsole(cons) {
-    try { qDeleteConsole.run(cons.key); } catch {}
+    dbfire('run', 'deleteConsole', [cons.key]);
     for (const v of cons.viewers.values()) {
         cons.viewers.delete(v.id);
         try { v.ws.close(4002, 'console-removed'); } catch {}
@@ -1161,6 +1117,7 @@ function removeConsole(cons) {
     cons.hostSock = null;
     cons.hostAlive = false;
     consoles.delete(cons.key);
+    dbfire('run', 'deleteConsole', [cons.key]);
     try {
         const shot = shotFileFor(cons.key);
         if (fs.existsSync(shot)) fs.unlinkSync(shot);
@@ -1570,18 +1527,20 @@ setInterval(() => {
 // host re-registers, so this only keeps the grid from piling up with dead rows.
 const PRUNE_AFTER_MS = 2 * 60 * 1000;
 
-setInterval(() => {
-    const now = Date.now();
-    for (const row of qListConsoles.all()) {
-        const live = consoles.get(row.key);
-        if (live && live.hostAlive) continue; // still up — skip
-        const lastSeen = row.last_seen || row.updated_at || 0;
-        if (!lastSeen || now - lastSeen < PRUNE_AFTER_MS) continue;
-        const downForMin = Math.round((now - lastSeen) / 60000);
-        log(`prune: console "${row.key}" down for ${downForMin} min — removing`);
-        if (live) removeConsole(live);
-        else try { qDeleteConsole.run(row.key); } catch {}
-    }
+setInterval(async () => {
+    try {
+        const now = Date.now();
+        for (const row of await dbq('all', 'listConsoles', [])) {
+            const live = consoles.get(row.key);
+            if (live && live.hostAlive) continue; // still up — skip
+            const lastSeen = row.last_seen || row.updated_at || 0;
+            if (!lastSeen || now - lastSeen < PRUNE_AFTER_MS) continue;
+            const downForMin = Math.round((now - lastSeen) / 60000);
+            log(`prune: console "${row.key}" down for ${downForMin} min — removing`);
+            if (live) removeConsole(live);
+            else await dbq('run', 'deleteConsole', [row.key]);
+        }
+    } catch (e) { warn(`prune failed: ${e.message}`); }
 }, 30000);
 
 // ── Thumbnail refresh ─────────────────────────────────────────────────────────
