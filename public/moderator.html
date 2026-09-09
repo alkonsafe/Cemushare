@@ -40,6 +40,7 @@
   .stat span { color: #8b96ab; font-size: .75rem; }
   .keylog { max-height: 340px; overflow: auto; }
   .mono { font-family: ui-monospace, Consolas, monospace; font-size: .8rem; }
+  mark { background: #513d14; color: #ffd479; border-radius: 3px; padding: 0 2px; }
   .err { color: #e0707a; }
   a { color: #7fb1ff; }
 </style>
@@ -64,8 +65,15 @@
   </section>
 
   <section><h2>keylog <span class="muted">(latest 300 — full history in keylog.log on the relay)</span></h2>
+    <div class="row">
+      <input id="klUser" placeholder="user (optional)" size="18">
+      <input id="klWord" placeholder="word: keys pressed in a row" size="26">
+      <button onclick="keySearch()">search</button>
+      <button onclick="keyClear()">clear</button>
+      <span id="klInfo" class="muted"></span>
+    </div>
     <div class="keylog">
-    <table><thead><tr><th>time</th><th>user</th><th>console</th><th>pressed</th><th>released</th></tr></thead>
+    <table><thead><tr><th>time</th><th>user</th><th>console</th><th id="klCtxHead">pressed</th><th id="klRelHead">released</th></tr></thead>
     <tbody id="keylog"></tbody></table>
     </div>
   </section>
@@ -165,7 +173,69 @@ function render(p) {
 }
 
 async function refresh() {
-  try { render(await jget('/api/admin/panel')); } catch (e) { if (e.message !== 'no') console.error(e); }
+  try {
+    render(await jget('/api/admin/panel'));
+    if (klSearch) await runKeySearch(true);
+  } catch (e) { if (e.message !== 'no') console.error(e); }
+}
+
+// ── keylog search ────────────────────────────────────────────────────────────
+// user and/or word: word = keys the user pressed one after the other, e.g.
+// "corn" matches KeyC→KeyO→KeyR→KeyN pressed consecutively. Matching rows show
+// what they were typing around the hit with the match highlighted.
+let klSearch = null;   // { user, word } | null
+function hlContext(m) {
+  const before = esc(m.context.slice(0, m.matchStart));
+  const mid = esc(m.context.slice(m.matchStart, m.matchStart + m.wordLen));
+  const after = esc(m.context.slice(m.matchStart + m.wordLen));
+  return `${before}<mark>${mid || '·'}</mark>${after}`;
+}
+function renderMatches(res) {
+  document.getElementById('klCtxHead').textContent = 'typed around match';
+  document.getElementById('klRelHead').textContent = 'keys';
+  document.getElementById('klInfo').textContent = `${res.matches.length} match(es) for "${res.word}"${res.user ? ` by "${res.user}"` : ''}`;
+  document.getElementById('keylog').innerHTML = res.matches.slice().reverse().map((m) => `
+    <tr>
+      <td class="muted mono">${fmtT(m.at)}</td>
+      <td>${esc(m.user)}</td>
+      <td class="mono">${esc(m.console)}</td>
+      <td class="mono" style="white-space:nowrap">…${hlContext(m)}…</td>
+      <td class="mono">${m.events.map((e) => esc((e.pressed || []).join('+'))).join(' → ')}</td>
+    </tr>`).join('') || '<tr><td colspan="5" class="muted">no matches</td></tr>';
+}
+async function runKeySearch(silent) {
+  const user = document.getElementById('klUser').value.trim();
+  const word = document.getElementById('klWord').value.trim();
+  if (!user && !word) { keyClear(); return; }
+  klSearch = { user, word };
+  try {
+    const res = await jget(`/api/admin/keysearch?user=${encodeURIComponent(user)}&word=${encodeURIComponent(word)}`);
+    if (word) renderMatches(res);
+    else {
+      // user-only: plain filtered log
+      document.getElementById('klCtxHead').textContent = 'pressed';
+      document.getElementById('klRelHead').textContent = 'released';
+      document.getElementById('klInfo').textContent = `logs for "${res.user || 'everyone'}" (latest 300)`;
+      document.getElementById('keylog').innerHTML = res.entries.slice().reverse().map((k) => `
+        <tr>
+          <td class="muted mono">${fmtT(k.at)}</td>
+          <td>${esc(k.user)}</td>
+          <td class="mono">${esc(k.console)}</td>
+          <td class="mono">${esc((k.pressed || []).join(' '))}</td>
+          <td class="muted mono">${esc((k.released || []).join(' '))}</td>
+        </tr>`).join('') || '<tr><td colspan="5" class="muted">nothing logged for this user</td></tr>';
+    }
+  } catch (e) { if (!silent || e.message !== 'no') console.error(e); }
+}
+async function keySearch() { await runKeySearch(false); }
+function keyClear() {
+  klSearch = null;
+  document.getElementById('klUser').value = '';
+  document.getElementById('klWord').value = '';
+  document.getElementById('klInfo').textContent = '';
+  document.getElementById('klCtxHead').textContent = 'pressed';
+  document.getElementById('klRelHead').textContent = 'released';
+  refresh();
 }
 
 async function banUser(name, banned) {

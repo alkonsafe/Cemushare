@@ -569,6 +569,56 @@ function recordKeys(cons, v, pressed, released) {
     } catch {}
 }
 
+// Search the keylog: filter by user and/or find a "word" = letters the user
+// pressed one after the other (e.g. word "corn" matches KeyC→KeyO→KeyR→KeyN in
+// consecutive presses, ignoring modifier/non-character keys like Shift/Enter).
+function domKeyToChar(k) {
+    let m = /^Key([A-Z])$/.exec(k);
+    if (m) return m[1].toLowerCase();
+    m = /^Digit(\d)$/.exec(k);
+    if (m) return m[1];
+    m = /^Numpad(\d)$/.exec(k);
+    if (m) return m[1];
+    if (k === 'Space') return ' ';
+    const map = { Comma: ',', Period: '.', Slash: '/', Semicolon: ';', Quote: "'", BracketLeft: '[', BracketRight: ']', Backslash: '\\', Minus: '-', Equal: '=', Backquote: '`' };
+    return map[k] || null;   // Shift/Enter/arrows/... never count as characters
+}
+function searchKeylog(userQ, wordQ) {
+    const user = String(userQ || '').trim().toLowerCase().slice(0, 32);
+    const rawWord = String(wordQ || '').trim().toLowerCase().replace(/[^a-z0-9 ]/g, '').slice(0, 32);
+    const entries = keylog.filter((e) => !user || e.user.toLowerCase() === user);
+    if (!rawWord) return { user, word: rawWord, matches: [], entries: entries.slice(-300) };
+    const events = [];
+    for (const e of entries) {
+        for (const k of e.pressed || []) {
+            const c = domKeyToChar(k);
+            if (c != null) events.push({ e, c });
+        }
+    }
+    const chars = events.map((x) => x.c).join('');
+    const matches = [];
+    let from = 0;
+    while (matches.length < 100) {
+        const i = chars.indexOf(rawWord, from);
+        if (i === -1) break;
+        from = i + 1;
+        const evts = events.slice(i, i + rawWord.length);
+        const evEntries = [...new Set(evts.map((x) => x.e))];   // insertion-ordered
+        const ctxStart = Math.max(0, i - 24);
+        const ctxEnd = Math.min(chars.length, i + rawWord.length + 24);
+        matches.push({
+            at: evts[evts.length - 1].e.at,
+            user: evts[0].e.user,
+            console: evts[0].e.console,
+            context: chars.slice(ctxStart, ctxEnd),
+            matchStart: i - ctxStart,
+            wordLen: rawWord.length,
+            events: evEntries.map((e) => ({ at: e.at, console: e.console, pressed: e.pressed, released: e.released })),
+        });
+    }
+    return { user, word: rawWord, matches, entries: [] };
+}
+
 async function handleAdminApi(req, res, url) {
     const user = userFromReq(req);
     const admin = !!(user && isRelayAdmin(user.username));
@@ -578,6 +628,10 @@ async function handleAdminApi(req, res, url) {
     if (!admin) return json(res, 403, { message: 'no' });
 
     const route = url.slice('/api/admin/'.length);
+    if (req.method === 'GET' && route === 'keysearch') {
+        const params = new URL(req.url, 'http://x').searchParams;
+        return json(res, 200, searchKeylog(params.get('user'), params.get('word')));
+    }
     if (req.method === 'GET' && route === 'panel') {
         const bannedUsers = new Set(qBannedUsers.all().map((r) => r.value));
         const consRows = [...consoles.values()].map((c) => ({
