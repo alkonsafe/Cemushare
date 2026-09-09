@@ -828,7 +828,10 @@ function launchGame(key) {
     }
 }
 function killGame() {
-    if (gameChild) { killGameTree(gameChild, 'SIGTERM'); gameChild = null; }
+    // SIGKILL, not SIGTERM: when switching games we don't ask, we murder.
+    // The whole process group dies instantly (games often ignore/handle TERM
+    // slowly, which would leave the old game's window/audio alive mid-switch).
+    if (gameChild) { killGameTree(gameChild, 'SIGKILL'); gameChild = null; }
     currentGameKey = null;
 }
 
