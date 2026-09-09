@@ -704,13 +704,13 @@ function connectStreamWs(consoleName) {
     };
 
     streamWs.onclose = () => {
-        setStreamStatus('disconnected - retrying…');
         waitingForKeyframe = true;
-        if (currentConsoleName) {
-            setTimeout(() => {
-                if (currentConsoleName) connectStreamWs(currentConsoleName);
-            }, 1500);
-        }
+        if (!currentConsoleName) return;   // intentional close (viewer X, duplicate bounce)
+        // Unexpected disconnect: no auto-reconnect — tell them, clean up state.
+        currentConsoleName = null;
+        setStreamStatus('disconnected');
+        exitCameraMode();
+        alert("you have disconnected");
     };
 
     streamWs.onerror = () => {};
