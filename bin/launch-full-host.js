@@ -144,7 +144,7 @@ function bin(name) {
     return r.status === 0 ? r.stdout.toString().trim() : null;
 }
 
-const REQUIRED = ['Xvfb', 'pulseaudio', 'pactl', 'ffmpeg', 'xdotool', 'xprop'];
+const REQUIRED = ['Xvfb', 'pulseaudio', 'pactl', 'ffmpeg', 'xdotool'];
 if (!noWm) REQUIRED.push('xfwm4', 'dbus-daemon', 'xfconfd');
 function xfconfdBin() {
     const c = bin('xfconfd');
@@ -791,41 +791,6 @@ function applyInput(keys, mouse) {
 }
 function releaseAll() { applyInput([], null); }
 
-// ── Window undecorate ───────────────────────────────────────────────────────
-// Games open their own window wherever they like. We find any window that
-// appears after the spawn and (best-effort) strip its frame: no minimize or
-// close buttons in the stream. Window size/position are left to the game and
-// the WM — no auto-maximizing.
-function listTopWindows() {
-    const r = spawnSync('xdotool', ['search', '--maxdepth', '2', '--onlyvisible', '--name', '.*'],
-        { env: childEnv(), encoding: 'utf8' });
-    return r.status === 0 ? r.stdout.trim().split(/\s+/).filter(Boolean) : [];
-}
-function undecorate(wid) {
-    // _MOTIF_WM_HINTS flags=2 (MWM_HINTS_DECORATIONS), decorations=0 → no frame.
-    spawnSync('xprop', ['-id', wid, '-f', '_MOTIF_WM_HINTS', '32c', '-set', '_MOTIF_WM_HINTS', '2, 0, 0, 0, 0'],
-        { env: childEnv(), stdio: 'ignore' });
-}
-let arrangeTimer = null;
-function arrangeNewWindows(before) {
-    clearInterval(arrangeTimer);
-    let calm = 0;
-    arrangeTimer = setInterval(() => {
-        if (!gameChild || !gameChild.pid || gameChild.exitCode !== null) { clearInterval(arrangeTimer); return; }
-        const fresh = listTopWindows().filter((w) => !before.has(w));
-        if (fresh.length) {
-            calm = 0;
-            for (const wid of fresh) {
-                if (!noWm) spawnSync('xdotool', ['windowactivate', wid], { env: childEnv(), stdio: 'ignore' });
-                undecorate(wid);
-                log(`undecorated game window ${wid}`);
-            }
-        } else if (++calm > 8) {
-            clearInterval(arrangeTimer);   // ~4s without a new window → done
-        }
-    }, 500);
-}
-
 // ── Game lifecycle ────────────────────────────────────────────────────────────
 let gameChild = null, currentGameKey = null;
 function broadcastState() {
@@ -848,8 +813,6 @@ function launchGame(key) {
         gameChild.stdout.on('data', () => {});
         currentGameKey = key;
         broadcastState();
-        // Any window that maps after the spawn is the game: fill + strip frame.
-        arrangeNewWindows(new Set(listTopWindows()));
         gameChild.on('error', (err) => {
             // e.g. ENOENT — the game binary isn't installed. This must NOT kill
             // the host: log it, clear state, keep the desktop streaming.
