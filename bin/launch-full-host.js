@@ -791,11 +791,11 @@ function applyInput(keys, mouse) {
 }
 function releaseAll() { applyInput([], null); }
 
-// ── Window arrange / undecorate ─────────────────────────────────────────────
-// Games open their own window wherever/thoever they like. We find any window
-// that appears after the spawn and (best-effort) fill the virtual screen and
-// strip the frame: no minimize or close buttons in the stream. Works for any
-// game — no title/key matching needed.
+// ── Window undecorate ───────────────────────────────────────────────────────
+// Games open their own window wherever they like. We find any window that
+// appears after the spawn and (best-effort) strip its frame: no minimize or
+// close buttons in the stream. Window size/position are left to the game and
+// the WM — no auto-maximizing.
 function listTopWindows() {
     const r = spawnSync('xdotool', ['search', '--maxdepth', '2', '--onlyvisible', '--name', '.*'],
         { env: childEnv(), encoding: 'utf8' });
@@ -816,13 +816,9 @@ function arrangeNewWindows(before) {
         if (fresh.length) {
             calm = 0;
             for (const wid of fresh) {
-                if (!noWm) {
-                    spawnSync('xdotool', ['windowsize', wid, String(resX || w), String(resY || h)], { env: childEnv(), stdio: 'ignore' });
-                    spawnSync('xdotool', ['windowmove', wid, '0', '0'], { env: childEnv(), stdio: 'ignore' });
-                    spawnSync('xdotool', ['windowactivate', wid], { env: childEnv(), stdio: 'ignore' });
-                }
+                if (!noWm) spawnSync('xdotool', ['windowactivate', wid], { env: childEnv(), stdio: 'ignore' });
                 undecorate(wid);
-                log(`arranged game window ${wid}: ${noWm ? 'unmanaged' : 'filled'} ${resX || w}x${resY || h}, decorations off`);
+                log(`undecorated game window ${wid}`);
             }
         } else if (++calm > 8) {
             clearInterval(arrangeTimer);   // ~4s without a new window → done
