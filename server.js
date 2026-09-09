@@ -946,7 +946,8 @@ server.on('upgrade', (req, socket, head) => {
     // Viewers must present a signed session token.
     let user = null;
     if (url === '/stream') {
-        if (qGetBan.get('ip', clientIp(req))) { warn(`ws: viewer connect blocked — banned ip ${clientIp(req)}`); socket.destroy(); return; }
+        const ip = clientIp(req);
+        if (qGetBan.get('ip', ip)) { warn(`ws: viewer connect blocked — banned ip ${ip}`); socket.destroy(); return; }
         const token = params.get('token') || '';
         const payload = verifyToken(token);
         const sess = payload ? qFindSession.get(token, Date.now()) : null;
@@ -963,7 +964,7 @@ server.on('upgrade', (req, socket, head) => {
 
     wss.handleUpgrade(req, socket, head, (ws) => {
         if (url === '/host') attachHost(ws, params.get('console') || '');
-        else attachViewer(ws, params.get('console') || '', user, clientIp(req));
+        else attachViewer(ws, params.get('console') || '', user, url === '/stream' ? clientIp(req) : '');
     });
 });
 
