@@ -722,9 +722,8 @@ function domKeyToXdotool(code) {
     if (punct[code]) return punct[code];
     return domToXdotool(code);
 }
-function xd(args) { try { spawnSync('xdotool', args, { env: childEnv(), stdio: 'ignore' }); } catch {} }
-
 // Fire-and-forget xdotool call: never let a failed spawn take the host down.
+// (Async spawn — never spawnSync here: this is the per-keystroke/per-move path.)
 function fireXdotool(args, delayMs) {
     const run = () => {
         const c = spawn('xdotool', args, { env: childEnv(), stdio: 'ignore' });

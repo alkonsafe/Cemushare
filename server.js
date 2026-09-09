@@ -233,16 +233,24 @@ const qDeleteSessionsByUser = db.prepare('DELETE FROM sessions WHERE user_id = ?
 // clean expired sessions occasionally
 setInterval(() => { try { qDeleteSession.run(Date.now()); } catch {} }, 60 * 60 * 1000);
 
-// ── Password hashing (scrypt) ────────────────────────────────────────────────
-function hashPassword(password) {
+// ── Password hashing (scrypt, async off the event loop) ─────────────────────
+// crypto.scryptSync used to block the whole relay ~50-100ms per attempt (every
+// login/register froze ALL consoles). The async form runs on the libuv
+// threadpool and leaves the event loop free.
+function scrypt(password, salt, keylen) {
+    return new Promise((resolve, reject) => {
+        crypto.scrypt(String(password), salt, keylen, (err, key) => (err ? reject(err) : resolve(key)));
+    });
+}
+async function hashPassword(password) {
     const salt = crypto.randomBytes(16).toString('hex');
-    const hash = crypto.scryptSync(String(password), salt, 64).toString('hex');
+    const hash = (await scrypt(password, salt, 64)).toString('hex');
     return `${salt}:${hash}`;
 }
-function verifyPassword(password, stored) {
+async function verifyPassword(password, stored) {
     const [salt, hash] = String(stored).split(':');
     if (!salt || !hash) return false;
-    const calc = crypto.scryptSync(String(password), salt, 64).toString('hex');
+    const calc = (await scrypt(password, salt, 64)).toString('hex');
     const a = Buffer.from(calc, 'hex'), b = Buffer.from(hash, 'hex');
     return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
@@ -471,7 +479,7 @@ async function handleRegister(req, res) {
     }
     if (password.length < 6) { logV(`register rejected: short password for "${username}"`); return json(res, 400, { message: 'password must be at least 6 characters' }); }
     if (qUserByName.get(username)) { logV(`register rejected: username taken "${username}"`); return json(res, 409, { message: 'username already taken' }); }
-    qCreateUser.run(username, hashPassword(password), Date.now());
+    qCreateUser.run(username, await hashPassword(password), Date.now());
     log(`auth: new account "${username}" created from ${req.socket.remoteAddress || 'unknown'}`);
     return json(res, 200, { message: 'registered' });
 }
@@ -485,7 +493,7 @@ async function handleLogin(req, res) {
     if (qGetBan.get('ip', clientIp(req))) { warn(`auth: login blocked — banned ip ${clientIp(req)}`); return json(res, 403, { message: 'banned' }); }
     if (qGetBan.get('user', username)) { warn(`auth: login blocked — banned user "${username}"`); return json(res, 403, { message: 'banned' }); }
     const user = qUserByName.get(username);
-    if (!user || !verifyPassword(password, user.password_hash)) {
+    if (!user || !(await verifyPassword(password, user.password_hash))) {
         warn(`auth: failed login for "${username}"`);
         return json(res, 401, { message: 'invalid username or password' });
     }
@@ -540,11 +548,21 @@ function userFromReq(req) {
     const sess = payload ? qFindSession.get(token, Date.now()) : null;
     return sess ? { id: sess.user_id, username: sess.username } : null;
 }
-function serveModerator(res) {
-    let html;
-    try { html = fs.readFileSync(path.join(PUBLIC_DIR, 'moderator.html')); }
-    catch { res.writeHead(404, { 'Content-Type': 'text/plain' }).end('moderator.html missing'); return; }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' }).end(html);
+// moderator.html cached in memory (re-read only when the file changes on disk);
+// the readFileSync-per-request version blocked the loop on every panel load.
+let moderatorCache = null;   // { mtimeMs, html }
+async function serveModerator(res) {
+    const file = path.join(PUBLIC_DIR, 'moderator.html');
+    try {
+        const st = await fs.promises.stat(file);
+        if (!moderatorCache || moderatorCache.mtimeMs !== st.mtimeMs) {
+            moderatorCache = { mtimeMs: st.mtimeMs, html: await fs.promises.readFile(file) };
+        }
+    } catch {
+        res.writeHead(404, { 'Content-Type': 'text/plain' }).end('moderator.html missing');
+        return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-cache' }).end(moderatorCache.html);
 }
 
 // Keylog: in-memory ring buffer (served to the panel) + dedicated keylog.log
@@ -820,7 +838,7 @@ async function handleDiscordAuth(req, res) {
     let user = qUserByDiscord.get(discordId);
     if (!user) {
         const username = makeUniqueUsername(sanitizeDiscordUsername(discordUser.username), discordId);
-        const info = qCreateDiscordUser.run(username, hashPassword(crypto.randomBytes(24).toString('hex')), Date.now(), discordId);
+        const info = qCreateDiscordUser.run(username, await hashPassword(crypto.randomBytes(24).toString('hex')), Date.now(), discordId);
         user = qUserById.get(Number(info.lastInsertRowid));
         log(`auth: "${username}" auto-registered via Discord (discord_id=${discordId})`);
     }
@@ -1069,17 +1087,25 @@ function requestShot(cons) {
     }
 }
 
+// Snapshot writes used to be synchronous (writeFileSync) — every thumbnail the
+// host pushed stalled the loop on the disk write. Async now, serialized per
+// console so two shots for the same console can't interleave mid-file.
+const shotWrites = new Map();
 function handleShot(cons, payload) {
     if (!cons || !payload || !payload.length) return;
     const file = shotFileFor(cons.key);
-    try {
-        fs.writeFileSync(file, payload);
-        const url = `/shots/${path.basename(file)}`;
-        qSetImage.run(url, Date.now(), cons.key);
-        log(`shot: updated ${cons.key} thumbnail -> ${url} (${payload.length} bytes)`);
-    } catch (err) {
-        warn(`shot: failed to store ${file}: ${err.message}`);
-    }
+    const prev = shotWrites.get(cons.key) || Promise.resolve();
+    const next = prev.then(async () => {
+        try {
+            await fs.promises.writeFile(file, payload);
+            const url = `/shots/${path.basename(file)}`;
+            qSetImage.run(url, Date.now(), cons.key);
+            log(`shot: updated ${cons.key} thumbnail -> ${url} (${payload.length} bytes)`);
+        } catch (err) {
+            warn(`shot: failed to store ${file}: ${err.message}`);
+        }
+    });
+    shotWrites.set(cons.key, next);
 }
 
 // ── Console lifecycle ─────────────────────────────────────────────────────────
