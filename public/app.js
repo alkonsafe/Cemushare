@@ -144,14 +144,13 @@ function checkAuth() {
 // ── Ban screen ────────────────────────────────────────────────────────────────
 // Ask the relay whether this visitor (account and/or IP) is banned before
 // showing any app UI. If yes, nothing else loads - just the ban screen.
+// (A ban answers 403 with {banned:true}; the body is the contract, not the status.)
 async function checkBanThenAuth() {
     try {
         const token = localStorage.getItem('token');
         const res = await fetch(`${API_BASE}/api/bancheck`, token ? { headers: { Authorization: 'Bearer ' + token } } : undefined);
-        if (res.ok) {
-            const data = await res.json();
-            if (data && data.banned) return showBanScreen(data.kind);
-        }
+        const data = await res.json().catch(() => null);
+        if (data && data.banned) return showBanScreen(data.kind);
     } catch {}
     checkAuth();
 }

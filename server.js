@@ -485,13 +485,28 @@ async function handleLogin(req, res) {
 }
 
 // ── Admin panel (/moderator) ────────────────────────────────────────────────
-// Ban check for the viewer: reports whether THIS visitor (session token and/or
-// IP) is banned, so the page can show the ban screen instead of the app.
+// Ban check for the viewer: reports whether THIS visitor (account and/or IP)
+// is banned, so the page can show the ban screen instead of the app. Returns
+// 403 + {banned:true,kind} when banned. Identity from a live session; if the
+// session is gone (banning a user deletes their sessions), the signed token
+// still proves who they are (HMAC - unforgeable), which closes the "banned
+// user reloads the page" hole.
 async function handleBanCheck(req, res) {
     const ip = clientIp(req);
+    let username = null;
     const user = await userFromReq(req);
-    if (user && await dbq('get', 'getBan', ['user', user.username])) return json(res, 200, { banned: true, kind: 'user' });
-    if (await dbq('get', 'getBan', ['ip', ip])) return json(res, 200, { banned: true, kind: 'ip' });
+    if (user) {
+        username = user.username;
+    } else {
+        let token = null;
+        const h = String(req.headers['authorization'] || '');
+        if (h.toLowerCase().startsWith('bearer ')) token = h.slice(7).trim();
+        if (!token) { try { token = new URL(req.url, 'http://x').searchParams.get('token'); } catch {} }
+        const payload = token ? verifyToken(token) : null;
+        if (payload && payload.username) username = payload.username;
+    }
+    if (username && await dbq('get', 'getBan', ['user', username])) return json(res, 403, { banned: true, kind: 'user' });
+    if (await dbq('get', 'getBan', ['ip', ip])) return json(res, 403, { banned: true, kind: 'ip' });
     return json(res, 200, { banned: false });
 }
 

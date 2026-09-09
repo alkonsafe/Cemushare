@@ -52,10 +52,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     check('ip ban (real header ip) blocks login', blocked.status === 403, String(blocked.status));
     const bcBanned = await fetch(`http://127.0.0.1:${PORT}/api/bancheck`, { headers: { 'CF-Connecting-IP': '203.0.113.9' } });
     const bcBannedBody = await bcBanned.json();
-    check('bancheck: banned ip reports banned', bcBanned.status === 200 && bcBannedBody.banned === true && bcBannedBody.kind === 'ip', JSON.stringify(bcBannedBody));
+    check('bancheck: banned ip reports banned (403)', bcBanned.status === 403 && bcBannedBody.banned === true && bcBannedBody.kind === 'ip', JSON.stringify(bcBannedBody));
     const bcClean = await fetch(`http://127.0.0.1:${PORT}/api/bancheck`);
     const bcCleanBody = await bcClean.json();
-    check('bancheck: clean socket reports not banned', bcCleanBody.banned === false, JSON.stringify(bcCleanBody));
+    check('bancheck: clean socket reports not banned', bcClean.status === 200 && bcCleanBody.banned === false, JSON.stringify(bcCleanBody));
+
+    // User ban with a DELETED session: bancheck must still identify them via
+    // the signed token (banning a user kills their sessions).
+    await fetch(`http://127.0.0.1:${PORT}/api/register`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'banme', password: 'pw123456' }) });
+    const banme = await (await fetch(`http://127.0.0.1:${PORT}/api/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: 'banme', password: 'pw123456' }) })).json();
+    await fetch(`http://127.0.0.1:${PORT}/api/admin/ban`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + tok }, body: JSON.stringify({ kind: 'user', value: 'banme' }) });
+    const bcUser = await fetch(`http://127.0.0.1:${PORT}/api/bancheck`, { headers: { Authorization: 'Bearer ' + banme.token } });
+    const bcUserBody = await bcUser.json();
+    check('bancheck: banned user w/ dead session identified via signed token', bcUser.status === 403 && bcUserBody.banned === true && bcUserBody.kind === 'user', JSON.stringify(bcUserBody));
     const direct = await fetch(`http://127.0.0.1:${PORT}/api/login`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username: 'directuser', password: 'pw123456' }),
