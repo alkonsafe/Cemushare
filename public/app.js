@@ -768,6 +768,7 @@ function handleStreamMessage(msg) {
                 if (streamWs) { try { streamWs.close(); } catch {} streamWs = null; }
                 break;
             }
+            setViewerBoxSize(msg.video || null);
             if (msg.video) configureVideo(msg.video);
             if (msg.audio) configureAudio(msg.audio);
             if (Array.isArray(msg.games)) { gamesList = msg.games.slice(0, 50); currentGameKey = msg.current || null; renderGames(); }
@@ -912,6 +913,25 @@ function getStreamCanvas() {
 
 let decoderProbe = null;
 
+// Optional CSS container size from the host (--cw / --ch). The canvas fills the
+// container via w-full/h-full object-contain, so these set the visible box. If
+// only one dimension is given, the other derives from the stream aspect ratio.
+// With no explicit size we clear the inline styles so the built-in 720x550 box
+// from the CSS classes applies again.
+function setViewerBoxSize(config) {
+    const box = document.getElementById('consoleViewerContainer');
+    if (!box) return;
+    const cw = Number(config && config.codedWidth) || 640;
+    const ch = Number(config && config.codedHeight) || 480;
+    const vw = Number(config && config.viewWidth) || 0;
+    const vh = Number(config && config.viewHeight) || 0;
+    if (vw && vh) { box.style.width = `${vw}px`; box.style.height = `${vh}px`; return; }
+    if (vw) { box.style.width = `${vw}px`; box.style.height = `${Math.round(vw * ch / cw)}px`; return; }
+    if (vh) { box.style.height = `${vh}px`; box.style.width = `${Math.round(vh * cw / ch)}px`; return; }
+    box.style.width = '';
+    box.style.height = '';
+}
+
 async function probeCodecSupport() {
     if (decoderProbe) return decoderProbe;
     if (typeof VideoDecoder === 'undefined') {
@@ -948,29 +968,16 @@ function decodeSupportStatus() {
 }
 
 async function configureVideo(config) {
+    // Always sync the container to THIS console's size — the size from the
+    // previously visited console must never stick (it used to, when a console
+    // sent no explicit viewer size the old inline styles were never cleared).
+    setViewerBoxSize(config);
     if (!config || !config.codec) return;
     try { if (videoDecoder && videoDecoder.state !== 'closed') videoDecoder.close(); } catch {}
 
     const canvas = getStreamCanvas();
     let ctx = canvas.getContext('2d');
     if (ctx) ctx.imageSmoothingEnabled = false;
-
-// Optional CSS container size from the host (--cw / --ch). The canvas fills
-    // the container via w-full/h-full object-contain, so these set the visible
-    // box. If only one dimension is given, the other derives from the stream
-    // aspect ratio so nothing gets squished.
-    if (config.viewWidth || config.viewHeight) {
-        const box = document.getElementById('consoleViewerContainer');
-        if (box) {
-            const cw = config.codedWidth || 640;
-            const ch = config.codedHeight || 480;
-            const vw = Number(config.viewWidth) || 0;
-            const vh = Number(config.viewHeight) || 0;
-            if (vw && vh) { box.style.width = `${vw}px`; box.style.height = `${vh}px`; }
-            else if (vw) { box.style.width = `${vw}px`; box.style.height = `${Math.round(vw * ch / cw)}px`; }
-            else if (vh) { box.style.height = `${vh}px`; box.style.width = `${Math.round(vh * cw / ch)}px`; }
-        }
-    }
 
     decoderConfig = {
         codec: config.codec,
