@@ -124,6 +124,27 @@ const log   = (...a) => logAt('info', ...a);
 const logV  = (...a) => logAt('verbose', ...a);   // noisiest: per-message / per-frame
 const warn  = (...a) => logAt('warn', ...a);
 const error = (...a) => logAt('error', ...a);
+
+// ── Crash reporting ──────────────────────────────────────────────────────────
+// A silent death is the worst kind to debug: route every fatal through the
+// logger first so the full stack lands in stdout + relay.log. Native crashes
+// (segfault / OOM-kill) bypass these handlers — for those check
+// `journalctl -xe`, `dmesg -T | grep -iE 'killed|segfault'`.
+let crashing = false;
+process.on('uncaughtException', (err) => {
+    if (crashing) return;
+    crashing = true;
+    error(`FATAL uncaught exception: ${(err && err.stack) || err}`);
+    try { if (logStream) logStream.end(); } catch {}
+    setTimeout(() => process.exit(1), 100).unref();
+});
+// A rejected promise usually only affects one request/connection, so log it
+// loudly (with stack) but KEEP SERVING — staying up beats dying mid-stream.
+process.on('unhandledRejection', (reason) => {
+    error(`unhandled rejection: ${(reason && reason.stack) || reason}`);
+});
+process.on('SIGTERM', () => { log('SIGTERM — shutting down'); try { if (logStream) logStream.end(); } catch {} process.exit(0); });
+process.on('SIGINT', () => { log('SIGINT — shutting down'); try { if (logStream) logStream.end(); } catch {} process.exit(0); });
 log(`logging to file: ${path.resolve(LOG_FILE)}`);
 
 // ── Limits ───────────────────────────────────────────────────────────────────
@@ -899,6 +920,7 @@ const server = http.createServer(async (req, res) => {
 
 // ── WebSockets ──────────────────────────────────────────────────────────────
 const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_MEDIA_FRAME });
+wss.on('error', (e) => error(`wss error: ${e.message}`));
 
 server.on('upgrade', (req, socket, head) => {
     handleUpgrade(req, socket, head).catch((err) => {
