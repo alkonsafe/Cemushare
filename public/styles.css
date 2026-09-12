@@ -50,6 +50,18 @@ button:focus {
     background: #a0aec0;
 }
 
+/* Console grid: fixed-width 350px cards, tight 16px gaps, wraps as needed. */
+#consolesGrid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, 350px);
+    gap: 16px;
+    align-items: start;
+}
+
+@media (max-width: 380px) {
+    #consolesGrid { grid-template-columns: 1fr; }
+}
+
 .console-card {
     width: 100%;
     min-width: 0;
