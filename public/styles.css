@@ -52,8 +52,6 @@ button:focus {
 
 .console-card {
     width: 100%;
-    max-width: 350px;
-    height: auto;
     min-width: 0;
     border-radius: 0.5rem;
     overflow: hidden;
