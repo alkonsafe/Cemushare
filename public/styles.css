@@ -51,27 +51,38 @@ button:focus {
 }
 
 .console-card {
-    width: 350px;
-    height: 300px;
+    width: 100%;
+    max-width: 350px;
+    height: auto;
+    min-width: 0;
     border-radius: 0.5rem;
     overflow: hidden;
     display: flex;
     flex-direction: column;
-    align-items: stretch;     
-    padding: 0;               
+    align-items: stretch;
+    padding: 0;
     box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
 }
 
 .console-card .console-image {
     width: 100%;
-    min-height: 0;            
+    aspect-ratio: 348 / 230;
     position: relative;
+    overflow: hidden;
+    background: #d1d5db;   /* placeholder while the snapshot loads */
+}
+
+.dark .console-card .console-image {
+    background: #374151;
 }
 
 .console-card .console-image img {
-    width: 348px;
-    height: 230px;
-    display: block;           
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
 }
 
 .console-card .card-content {
@@ -82,7 +93,7 @@ button:focus {
     padding: 0.5rem 0.75rem;
     flex: 1;
     min-width: 0;
-    min-height: 10;
+    min-height: 0;
 }
 
 .console-card .card-content .title {
