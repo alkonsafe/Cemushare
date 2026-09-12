@@ -1565,8 +1565,17 @@ setInterval(() => {
         if (!cons.hostAlive) { cons.lastVideoAt = Date.now(); continue; }
         const stalled = Date.now() - cons.lastVideoAt;
         if (stalled > 75000) {
-            error(`[${cons.key}] no video for ${(stalled / 1000) | 0}s — exiting for restart`);
-            process.exit(1);
+            // One frozen console must NOT take the whole relay down (this used
+            // to process.exit(1)). Drop the host socket instead: the host's own
+            // supervisor/reconnect logic brings it back, viewers stay put and
+            // see the "console went down" status until it does.
+            error(`[${cons.key}] no video for ${(stalled / 1000) | 0}s — dropping the host socket for a reconnect`);
+            try { cons.hostSock.close(4003, 'video-stalled'); } catch {}
+            cons.hostSock = null;
+            cons.hostAlive = false;
+            cons.lastVideoAt = Date.now();
+            broadcastJson(cons, { t: 'host', up: false });
+            continue;
         }
         if (stalled > 20000 && Date.now() - cons.reloadSentAt > 75000) {
             cons.reloadSentAt = Date.now();
