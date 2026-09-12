@@ -774,6 +774,11 @@ function applyInput(keys, mouse) {
                 fireXdotool(['mousedown', btn]);
                 fireXdotool(['mouseup', btn], 60);
             }
+            // Scroll wheel: each tick = one xdotool click (4 = scroll up, 5 = down).
+            if (mouse.wheel) {
+                const n = Math.min(3, Math.abs(mouse.wheel));
+                for (let i = 0; i < n; i++) fireXdotool(['click', mouse.wheel > 0 ? '5' : '4'], i * 30);
+            }
             return;
         }
         // Viewer coords are in stream pixel space (0..w, 0..h). If the virtual

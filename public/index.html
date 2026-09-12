@@ -170,6 +170,11 @@
                 </div>
 
                 <div class="mt-3 flex w-full max-w-[720px] gap-2">
+                    <button id="muteBtn" data-action="toggleMute" class="select-none rounded-lg px-3 py-1.5 text-sm shadow bg-gray-500 text-white active:bg-gray-600 flex items-center gap-1.5">
+                        <svg id="volOn" class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>
+                        <svg id="volOff" class="w-4 h-4 hidden" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>
+                        <span id="muteLabel">Mute</span>
+                    </button>
                     <button id="toggleGamepadBtn" data-action="toggleGamepad" class="hidden select-none rounded-lg px-3 py-1.5 text-sm shadow bg-indigo-500 text-white active:bg-indigo-600">Keyboard (on-screen)</button>
                     <button id="remapBtn" data-action="openRemapModal" class="hidden select-none rounded-lg px-3 py-1.5 text-sm shadow bg-gray-500 text-white active:bg-gray-600">Remap keys</button>
                 </div>
@@ -211,6 +216,11 @@
                             <input type="text" id="chatInput" placeholder="Type a message..." class="shadow flex-1 px-4 py-2 border bg-white border-gray-300 dark:border-gray-600 rounded-l-md focus:ring-2 focus:ring-blue-500 focus:border-transparent dark:bg-gray-700 dark:text-white">
                             <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-medium px-4 rounded-r-md transition-colors">Send</button>
                         </form>
+                    </div>
+
+                    <div id="liveInputContainer" class="shadow h-60 w-1/4 bg-white dark:bg-gray-700 rounded-lg p-4 border border-gray-300 dark:border-gray-600 flex flex-col">
+                        <h3 class="dark:text-white text-black font-medium mb-2 border-b border-gray-300 dark:border-gray-600 pb-1">Live input:</h3>
+                        <ul id="liveInputList" class="text-gray-300 text-sm overflow-y-auto h-48"></ul>
                     </div>
                 </div>
             </div>

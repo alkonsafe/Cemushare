@@ -1198,6 +1198,7 @@ function attachViewer(ws, consoleParam, user, ip) {
         userId: user.id,
         ip: ip || '',
         keys: new Set(),
+        heldButtons: new Set(),   // camera-mode mouse buttons currently held (live-input box)
         keysAt: 0,
         lastChat: 0,
         joinedAt: Date.now(),
@@ -1234,6 +1235,7 @@ function attachViewer(ws, consoleParam, user, ip) {
     ws.on('close', () => {
         cons.viewers.delete(v.id);
         log(`viewer "${v.username}" (${v.id}) left console "${cons.key}" (${cons.viewers.size} online)`);
+        broadcastJson(cons, { t: 'liveinput', id: v.id, name: v.username, held: [] });   // clear their live-input row
         if (cons.vote) {
             cons.vote.yes.delete(v.id);
             cons.vote.no.delete(v.id);
@@ -1262,14 +1264,19 @@ function handleViewerMsg(cons, v, msg) {
                     v.mouse = { rel: true, dx: Math.round(+msg.mouse.dx || 0), dy: Math.round(+msg.mouse.dy || 0), click: !!msg.mouse.click, button: +msg.mouse.button || 0 };
                     if (msg.mouse.held === true) v.mouse.held = true;
                     else if (msg.mouse.held === false) v.mouse.held = false;
+                    if (msg.mouse.wheel) v.mouse.wheel = Math.max(-3, Math.min(3, Math.round(+msg.mouse.wheel || 0)));
                 } else {
                     v.mouse = { x: +msg.mouse.x || 0, y: +msg.mouse.y || 0, click: !!msg.mouse.click, button: +msg.mouse.button || 0 };
                 }
-                // Each physical click gets a fresh nonce so two identical clicks
-                // at the same position are distinguishable by the host (without
-                // this, click 2 looks identical to click 1 in the merge state).
-                if (v.mouse.click) { v.clickNonce = (v.clickNonce || 0) + 1; v.mouse.nonce = v.clickNonce; }
+                // Each physical click/wheel tick gets a fresh nonce so two identical
+                // actions are distinguishable by the host (without this, action 2
+                // looks identical to action 1 in the merge state).
+                if (v.mouse.click || v.mouse.wheel) { v.clickNonce = (v.clickNonce || 0) + 1; v.mouse.nonce = v.clickNonce; }
             }
+            // Track camera-mode button holds per viewer for the live-input box.
+            let btnsChanged = false;
+            if (v.mouse && v.mouse.rel && v.mouse.held === true && !v.heldButtons.has(v.mouse.button)) { v.heldButtons.add(v.mouse.button); btnsChanged = true; }
+            else if (v.mouse && v.mouse.rel && v.mouse.held === false && v.heldButtons.has(v.mouse.button)) { v.heldButtons.delete(v.mouse.button); btnsChanged = true; }
             const pressed = [...next].filter((k) => !v.keys.has(k));
             const released = [...v.keys].filter((k) => !next.has(k));
             v.keys = next;
@@ -1277,6 +1284,11 @@ function handleViewerMsg(cons, v, msg) {
             recordKeys(cons, v, pressed, released);
             if (pressed.length) log(`key: ${v.username} (${v.id}) pressed [${pressed.join(',')}] on "${cons.key}"`);
             if (released.length) log(`key: ${v.username} (${v.id}) released [${released.join(',')}] on "${cons.key}"`);
+            // Live input feed: tell every viewer what this player is holding
+            // right now (keys + held mouse buttons); empty held = they let go.
+            if (pressed.length || released.length || btnsChanged) {
+                broadcastJson(cons, { t: 'liveinput', id: v.id, name: v.username, held: [...next, ...[...v.heldButtons].map((b) => 'M' + b)] });
+            }
             // Low-latency path: a viewer changed its keys, so forward the merge to
             // the host on this tick-of-event-loop instead of waiting for the next
             // 30Hz poll. The merge functions dedupe identical states, so this is
@@ -1461,10 +1473,10 @@ function mergeAnarchy(cons, active) {
     for (const v of active) {
         for (const k of v.keys) out.add(k);
         const m = v.mouse;
-        // Clicks always forward; relative camera deltas forward as movement,
-        // and so do button hold transitions. Zero-delta camera reports carry no
-        // motion, so skip those unless they are a hold change.
-        if (m && (m.click || (m.rel && ((m.dx || m.dy) || m.held !== undefined)))) mouse.push(m);
+        // Clicks and wheel ticks always forward; relative camera deltas forward
+        // as movement, and so do button hold transitions. Zero-delta camera
+        // reports carry no motion, so skip those unless they are a hold change.
+        if (m && (m.click || m.wheel || (m.rel && ((m.dx || m.dy) || m.held !== undefined)))) mouse.push(m);
     }
     return { keys: out, mouse };
 }
@@ -1498,18 +1510,18 @@ function flushConsoleInput(cons, now) {
     }
     const merged = cons.mode === 'democracy' ? mergeDemocracy(cons, active) : mergeAnarchy(cons, active);
     const serialized = [...merged.keys].sort().join(',') + '|' +
-        (merged.mouse.length ? merged.mouse.map((m) => m.rel ? `r${m.dx},${m.dy},${m.held === true ? 1 : m.held === false ? 0 : ''},${m.button}:${m.nonce || 0}` : `${m.x},${m.y},${m.button}:${m.nonce || 0}`).join(';') : '');
-    // Consume clicks as soon as they're sent: a stored click:true would otherwise
-    // be re-merged on every later input message (keys/keepalive) and re-trigger
-    // mousedown+mouseup on the host, so one physical click becomes many.
-    for (const v of active) if (v.mouse && v.mouse.click) v.mouse = null;
-    if (serialized !== cons.lastSentKeys || merged.mouse.some((m) => m.click)) {
+        (merged.mouse.length ? merged.mouse.map((m) => m.rel ? `r${m.dx},${m.dy},${m.held === true ? 1 : m.held === false ? 0 : ''},${m.button}${m.wheel ? ',w' + m.wheel : ''}:${m.nonce || 0}` : `${m.x},${m.y},${m.button}:${m.nonce || 0}`).join(';') : '');
+    // Consume clicks and wheel ticks as soon as they're sent: a stored click or
+    // wheel would otherwise be re-merged on every later input message and
+    // re-trigger on the host, so one physical action becomes many.
+    for (const v of active) if (v.mouse && (v.mouse.click || v.mouse.wheel)) v.mouse = null;
+    if (serialized !== cons.lastSentKeys || merged.mouse.some((m) => m.click || m.wheel)) {
         cons.lastSentKeys = serialized;
         logV(`input: sending merged ${merged.keys.size} key(s) to host "${cons.key}"`);
-        // Prefer the latest click so a follow-up camera delta never masks it.
+        // Prefer the latest click/wheel so a follow-up camera delta never masks it.
         let fwdMouse = null;
         for (let i = merged.mouse.length - 1; i >= 0; i--) {
-            if (merged.mouse[i].click) { fwdMouse = merged.mouse[i]; break; }
+            if (merged.mouse[i].click || merged.mouse[i].wheel) { fwdMouse = merged.mouse[i]; break; }
         }
         if (!fwdMouse && merged.mouse.length) fwdMouse = merged.mouse[merged.mouse.length - 1];
         sendHost(cons, { t: 'input', keys: [...merged.keys], mouse: fwdMouse });

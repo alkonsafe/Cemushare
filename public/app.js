@@ -771,6 +771,7 @@ function handleStreamMessage(msg) {
             if (msg.video) configureVideo(msg.video);
             if (msg.audio) configureAudio(msg.audio);
             if (Array.isArray(msg.games)) { gamesList = msg.games.slice(0, 50); currentGameKey = msg.current || null; renderGames(); }
+            clearLiveInput();
             if (!msg.host) setStreamStatus('console is booting…');
             else setStreamStatus('');
             break;
@@ -786,6 +787,9 @@ function handleStreamMessage(msg) {
             break;
         case 'roster':
             updatePlayerList(msg.users || []);
+            break;
+        case 'liveinput':
+            updateLiveInput(msg.id, msg.name, msg.held || []);
             break;
         case 'chat':
             if (msg.from && msg.text) addChatMessage(msg.from, msg.text, false, false, null);
@@ -1406,7 +1410,7 @@ async function configureAudio(config) {
                 }
                 const src = audioCtx.createBufferSource();
                 src.buffer = buf;
-                src.connect(audioCtx.destination);
+                src.connect(masterGain || audioCtx.destination);
                 const now = audioCtx.currentTime;
                 if (playHead < now + 0.01) playHead = now + JITTER_S;
                 if (playHead - now > MAX_AUDIO_LEAD_S) {
@@ -1435,9 +1439,27 @@ function unlockAudio() {
     try {
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         audioCtx.resume();
+        masterGain = audioCtx.createGain();
+        masterGain.gain.value = audioMuted ? 0 : 1;
+        masterGain.connect(audioCtx.destination);
         audioUnlocked = true;
         playHead = 0;
     } catch (err) { console.warn('audio unlock failed', err); }
+}
+
+// ── Audio mute ───────────────────────────────────────────────────────────────
+let audioMuted = false;
+let masterGain = null;
+function toggleMute() {
+    audioMuted = !audioMuted;
+    if (masterGain) masterGain.gain.value = audioMuted ? 0 : 1;
+    const btn = document.getElementById('muteBtn');
+    if (btn) {
+        btn.querySelector('#volOn').classList.toggle('hidden', audioMuted);
+        btn.querySelector('#volOff').classList.toggle('hidden', !audioMuted);
+        const label = btn.querySelector('#muteLabel');
+        if (label) label.textContent = audioMuted ? 'Unmute' : 'Mute';
+    }
 }
 
 // ── Input forwarding ────────────────────────────────────────────────────────
@@ -1539,6 +1561,15 @@ function setupStreamInput() {
             sendStreamInput({ mouse: null }); // just keys; host's auto-mouseup fires
         }
     });
+    // Scroll wheel in camera mode scrolls the actual emulator (xdotool click
+    // 4/5 on the host). preventDefault keeps the page itself from scrolling.
+    canvas.addEventListener('wheel', (e) => {
+        if (!cameraActive) return;
+        e.preventDefault();
+        const clicks = Math.max(-3, Math.min(3, Math.round(e.deltaY / 100)));
+        if (!clicks) return;
+        sendStreamInput({ mouse: { dx: 0, dy: 0, rel: true, wheel: clicks } });
+    }, { passive: false });
 }
 
 // Coalesce/dedupe input: remember the last mouse position we forwarded and the
@@ -1555,8 +1586,8 @@ function sendStreamInput(msg) {
     const m = msg.mouse || null;
     if (m) {
         const now = Date.now();
-        // Clicks and button hold transitions must go through immediately.
-        if (m.click || m.held !== undefined) {
+        // Clicks, wheel ticks and button hold transitions must go through immediately.
+        if (m.click || m.held !== undefined || m.wheel !== undefined) {
             flushInput(msg);
             return;
         }
@@ -1967,23 +1998,60 @@ function updatePlayerList(players) {
 function addPlayerToList(username) {
     const playerList = document.getElementById('playerList')
     if (!playerList) return
-    
+
     // check if player already exists
     const existing = Array.from(playerList.children).find(
         el => el.dataset.username === username
     )
     if (existing) return
-    
+
     const playerEl = document.createElement('div')
     playerEl.className = 'flex items-center gap-2 px-2 py-1.5 rounded-md bg-white dark:bg-gray-700 hover:bg-gray-600/10 dark:hover:bg-gray-800/60 '
     playerEl.dataset.username = username
-    
+
     playerEl.innerHTML = `
         <span class="text-black dark:text-white text-xs">▶</span>
         <span class="text-sm text-gray-900 dark:text-white truncate">${escapeHtml(username)}</span>
     `
-    
+
     playerList.appendChild(playerEl)
+}
+
+// ── Live input box (right of the player list) ────────────────────────────────
+// Shows what every player is holding RIGHT NOW. The server broadcasts each
+// player's held keys/buttons on every change; an empty held list drops the row.
+const liveInputState = new Map();   // viewer id -> { name, held: [] }
+function updateLiveInput(id, name, held) {
+    if (!held.length) liveInputState.delete(id);
+    else liveInputState.set(id, { name, held });
+    renderLiveInput();
+}
+function clearLiveInput() {
+    liveInputState.clear();
+    renderLiveInput();
+}
+function renderLiveInput() {
+    const list = document.getElementById('liveInputList');
+    if (!list) return;
+    list.innerHTML = '';
+    for (const { name, held } of liveInputState.values()) {
+        const li = document.createElement('li');
+        li.className = 'flex items-start gap-2 py-0.5 flex-wrap';
+        const label = document.createElement('span');
+        label.className = 'text-sm text-gray-900 dark:text-white truncate max-w-[90px]';
+        label.textContent = name;
+        const chips = document.createElement('span');
+        chips.className = 'flex flex-wrap gap-1';
+        for (const k of held) {
+            const chip = document.createElement('span');
+            chip.className = 'text-xs font-mono px-1.5 py-0.5 rounded bg-blue-100 dark:bg-blue-900 text-blue-700 dark:text-blue-300';
+            chip.textContent = codeLabel(k) || k;
+            chips.appendChild(chip);
+        }
+        li.appendChild(label);
+        li.appendChild(chips);
+        list.appendChild(li);
+    }
 }
 
 function removePlayerFromList(username) {
