@@ -748,6 +748,14 @@ function fireXdotool(args, delayMs) {
         if (p && p.stdin && p.stdin.writable) {
             try { p.stdin.write(line); return; } catch { try { p.kill(); } catch {} xdotoolProc = null; }
         }
+        spawnXdotool(args);
+    };
+    if (delayMs) setTimeout(run, delayMs); else run();
+}
+
+// Scrolls always spawn their own process (never the stdin pipe).
+function spawnXdotool(args, delayMs) {
+    const run = () => {
         const c = spawn('xdotool', args, { env: childEnv(), stdio: 'ignore' });
         c.on('error', () => {});
         c.unref();
@@ -796,10 +804,11 @@ function applyInput(keys, mouse) {
                 fireXdotool(['mousedown', btn]);
                 fireXdotool(['mouseup', btn], 60);
             }
-            // Scroll wheel: each tick = one xdotool click (4 = scroll up, 5 = down).
+            // Scroll wheel: each tick = its own xdotool process (never the pipe),
+            // one click per tick (4 = scroll up, 5 = down).
             if (mouse.wheel) {
                 const n = Math.min(3, Math.abs(mouse.wheel));
-                for (let i = 0; i < n; i++) fireXdotool(['click', mouse.wheel > 0 ? '5' : '4'], i * 30);
+                for (let i = 0; i < n; i++) spawnXdotool(['click', mouse.wheel > 0 ? '5' : '4'], i * 30);
             }
             return;
         }
