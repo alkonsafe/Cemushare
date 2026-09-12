@@ -722,10 +722,32 @@ function domKeyToXdotool(code) {
     if (punct[code]) return punct[code];
     return domToXdotool(code);
 }
+// Persistent `xdotool -` pipe: one long-lived process reading commands from
+// stdin, instead of a fork per keystroke/move (a fork adds 1-5ms of latency
+// jitter per input — worst case at 60fps camera deltas, that's 60 forks/sec).
+// If the pipe dies (X restart), the next call respawns it; if stdin is somehow
+// unusable we fall back to spawn-per-call.
+let xdotoolProc = null;
+function xdotoolPipe() {
+    if (xdotoolProc) return xdotoolProc;
+    try {
+        const p = spawn('xdotool', ['-'], { env: childEnv(), stdio: ['pipe', 'ignore', 'ignore'] });
+        p.on('error', () => { xdotoolProc = null; });
+        p.on('exit', () => { xdotoolProc = null; });
+        xdotoolProc = p;
+    } catch { xdotoolProc = null; }
+    return xdotoolProc;
+}
+
 // Fire-and-forget xdotool call: never let a failed spawn take the host down.
 // (Async spawn — never spawnSync here: this is the per-keystroke/per-move path.)
 function fireXdotool(args, delayMs) {
+    const line = args.join(' ') + '\n';
     const run = () => {
+        const p = xdotoolPipe();
+        if (p && p.stdin && p.stdin.writable) {
+            try { p.stdin.write(line); return; } catch { try { p.kill(); } catch {} xdotoolProc = null; }
+        }
         const c = spawn('xdotool', args, { env: childEnv(), stdio: 'ignore' });
         c.on('error', () => {});
         c.unref();
