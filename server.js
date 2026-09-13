@@ -979,6 +979,8 @@ function attachHost(ws, consoleParam) {
     if (cons && cons.hostSock) { try { cons.hostSock.close(4000, 'replaced'); } catch {} }
 
     let sawRegister = false, sawFirstFrame = false;
+    ws._esAlive = true;
+    ws.on('pong', () => { ws._esAlive = true; });
     log(`host ws: connected (console=${consoleKey || '?pending'})`);
 
     ws.on('message', (data, isBinary) => {
@@ -1200,16 +1202,19 @@ function attachViewer(ws, consoleParam, user, ip) {
     const dup = [...cons.viewers.values()].find((o) =>
         (user.id != null ? o.username === user.username : (o.userId == null && o.ip === ip)));
     if (dup) {
-        if (dup.ws.readyState === 1) {
+        // readyState alone lies on a half-open socket (network dropped without a
+        // close) — the heartbeat pong tells the truth. Fresh pong = really here:
+        // reject the second tab. Stale pong = zombie: replace it.
+        if (dup.ws.readyState === 1 && Date.now() - (dup.lastPongAt || 0) < 40000) {
             log(`viewer: rejected — "${user.username}" already has a tab open on "${cons.key}"`);
             ws.send(JSON.stringify({ t: 'welcome', host: false, video: null, audio: null, error: 'duplicate-client' }));
             const die = () => { try { ws.close(4005, 'duplicate-client'); } catch {} };
             setTimeout(die, 300);
             return;
         }
-        // The existing socket is half-dead (gone without a close) — drop it
-        // and let this fresh connection take over instead of bouncing them.
-        try { dup.ws.close(); } catch {}
+        // The existing connection is a zombie — drop it and let this fresh
+        // connection take over instead of bouncing them.
+        try { dup.ws.terminate(); } catch {}
         cons.viewers.delete(dup.id);
     }
 
@@ -1224,7 +1229,10 @@ function attachViewer(ws, consoleParam, user, ip) {
         keysAt: 0,
         lastChat: 0,
         joinedAt: Date.now(),
+        isAlive: true,            // heartbeat: false after a ping until the pong arrives
+        lastPongAt: Date.now(),
     };
+    ws.on('pong', () => { v.isAlive = true; v.lastPongAt = Date.now(); });
     cons.viewers.set(v.id, v);
     log(`viewer "${v.username}" (${v.id}) joined console "${cons.key}" from ${v.ip || '?'} (${cons.viewers.size} online)`);
 
@@ -1558,6 +1566,36 @@ setInterval(() => {
     const now = Date.now();
     for (const cons of consoles.values()) flushConsoleInput(cons, now);
 }, Math.round(1000 / TICK_HZ));
+
+// ── Heartbeat: reap dead connections ─────────────────────────────────────────
+// A network drop (wifi off, no FIN/RST) leaves sockets half-open: readyState
+// still says OPEN, so the viewer never leaves the roster and their rejoin gets
+// bounced as a duplicate. Ping everyone every 15s; no pong since the last ping
+// → terminate, which fires the normal close path (roster update + live-input
+// cleanup). Browsers answer pings automatically, no client code involved.
+setInterval(() => {
+    for (const cons of consoles.values()) {
+        for (const v of [...cons.viewers.values()]) {
+            if (!v.isAlive) {
+                log(`viewer "${v.username}" (${v.id}): no pong — connection dead, terminating`);
+                try { v.ws.terminate(); } catch {}
+                continue;
+            }
+            v.isAlive = false;
+            try { v.ws.ping(); } catch {}
+        }
+        const h = cons.hostSock;
+        if (h) {
+            if (h._esAlive === false) {
+                warn(`host "${cons.key}": no pong — connection dead, terminating`);
+                try { h.terminate(); } catch {}
+                continue;
+            }
+            h._esAlive = false;
+            try { h.ping(); } catch {}
+        }
+    }
+}, 15000);
 
 // ── Watchdog (per console) + keyframe + stats ───────────────────────────────
 setInterval(() => {
