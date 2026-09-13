@@ -844,10 +844,28 @@ function launchGame(key) {
             detached: true,
             stdio: ['ignore', 'pipe', 'pipe'],
         });
-        gameChild.stderr.on('data', () => {});
-        gameChild.stdout.on('data', () => {});
+        // Ring-buffer the game's output: log a line live at most every 2s, and
+        // on exit dump the tail. (A game that dies instantly used to take its
+        // crash reason with it — silent exits were un-debuggable.)
+        const outLines = [];
+        let lastLiveLog = 0;
+        const capture = (d) => {
+            for (const line of d.toString().split(/\r?\n/)) {
+                if (!line.trim()) continue;
+                outLines.push(line.slice(0, 240));
+                if (outLines.length > 40) outLines.shift();
+            }
+            const now = Date.now();
+            if (now - lastLiveLog > 2000 && outLines.length) {
+                lastLiveLog = now;
+                log(`[game] ${outLines[outLines.length - 1]}`);
+            }
+        };
+        gameChild.stderr.on('data', capture);
+        gameChild.stdout.on('data', capture);
         currentGameKey = key;
         broadcastState();
+        // Any window that maps after the spawn is the game: fill + strip frame.
         gameChild.on('error', (err) => {
             // e.g. ENOENT — the game binary isn't installed. This must NOT kill
             // the host: log it, clear state, keep the desktop streaming.
@@ -856,7 +874,13 @@ function launchGame(key) {
             if (currentGameKey === key) { currentGameKey = null; gameChild = null; }
             broadcastState();
         });
-        gameChild.on('exit', () => { console.log(`[full] game "${g.name}" exited`); if (currentGameKey === key) { currentGameKey = null; killGameTree(gameChild, 'SIGKILL'); gameChild = null; broadcastState(); } });
+        gameChild.on('exit', (code, signal) => {
+            console.log(`[full] game "${g.name}" exited (code=${code}${signal ? `, signal=${signal}` : ''})`);
+            if (outLines.length) {
+                console.log(`[full] last game output:\n${outLines.slice(-15).map((l) => `  | ${l}`).join('\n')}`);
+            }
+            if (currentGameKey === key) { currentGameKey = null; killGameTree(gameChild, 'SIGKILL'); gameChild = null; broadcastState(); }
+        });
     } catch (err) {
         console.error(`[full] failed to launch game: ${err.message}`);
         currentGameKey = null; broadcastState();
