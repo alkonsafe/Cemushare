@@ -310,6 +310,7 @@ function makeConsoleState(key, name) {
         key, name,
         motd: null,
         viewers: new Map(),
+        audioClients: new Set(),    // passive audio-only sockets (/audio) - not players
         hostSock: null, hostAlive: false,
         mode: 'anarchy',            // 'anarchy' | 'democracy'
         lastSentKeys: '',
@@ -931,7 +932,7 @@ server.on('upgrade', (req, socket, head) => {
 async function handleUpgrade(req, socket, head) {
     const url = (req.url || '').split('?')[0];
     const params = new URL(req.url, 'http://x').searchParams;
-    if (url !== '/host' && url !== '/stream') { socket.destroy(); return; }
+    if (url !== '/host' && url !== '/stream' && url !== '/audio') { socket.destroy(); return; }
 
     // Hosts are token-gated: only our own chromium processes may connect.
     if (url === '/host') {
@@ -942,9 +943,9 @@ async function handleUpgrade(req, socket, head) {
         }
     }
 
-    // Viewers must present a signed session token.
+    // Viewers (and passive audio clients) must present a signed session token.
     let user = null;
-    if (url === '/stream') {
+    if (url === '/stream' || url === '/audio') {
         const ip = clientIp(req);
         if (await dbq('get', 'getBan', ['ip', ip])) { warn(`ws: viewer connect blocked — banned ip ${ip}`); socket.destroy(); return; }
         const token = params.get('token') || '';
@@ -964,7 +965,8 @@ async function handleUpgrade(req, socket, head) {
     await new Promise((resolve) => {
         wss.handleUpgrade(req, socket, head, (ws) => {
             if (url === '/host') attachHost(ws, params.get('console') || '');
-            else attachViewer(ws, params.get('console') || '', user, url === '/stream' ? clientIp(req) : '');
+            else if (url === '/stream') attachViewer(ws, params.get('console') || '', user, clientIp(req));
+            else attachAudioClient(ws, params.get('console') || '', user);
             resolve();
         });
     });
@@ -1022,7 +1024,11 @@ function attachHost(ws, consoleParam) {
                     cons.__frameBytes = 0;
                 }
             }
-            broadcastBinary(cons, data);
+            // Audio chunks go to the dedicated /audio connections (their own TCP
+            // stream - audio never queues behind a fat video keyframe); video
+            // frames to the /stream viewers.
+            if (kind === KIND.ACHUNK) broadcastAudio(cons, data);
+            else broadcastBinary(cons, data);
             return;
         }
         let msg; try { msg = JSON.parse(data.toString('utf8')); } catch { return; }
@@ -1068,6 +1074,7 @@ function attachHost(ws, consoleParam) {
                     cons.audioConfig = msg.config || null;
                     log(`host ${cons.key}: audio config ${msg.config ? `${msg.config.codec} ${msg.config.sampleRate || ''}Hz` : '(null)'}`);
                     broadcastJson(cons, { t: 'aconfig', config: cons.audioConfig });
+                    broadcastAudioJson(cons, { t: 'aconfig', config: cons.audioConfig });
                 }
                 else if (msg.t === 'gamestate') {
                     const was = cons.currentGame;
@@ -1167,6 +1174,10 @@ function removeConsole(cons) {
         cons.viewers.delete(v.id);
         try { v.ws.close(4002, 'console-removed'); } catch {}
     }
+    for (const a of cons.audioClients.values()) {
+        try { a.ws.close(4002, 'console-removed'); } catch {}
+    }
+    cons.audioClients.clear();
     if (cons.hostSock) { try { cons.hostSock.close(4003, 'console-removed'); } catch {} }
     cons.hostSock = null;
     cons.hostAlive = false;
@@ -1284,6 +1295,29 @@ function attachViewer(ws, consoleParam, user, ip) {
     ws.on('error', () => {});
 }
 
+// ── Audio side ──────────────────────────────────────────────────────────────
+// Passive audio-only connections (/audio): same auth as viewers, but they are
+// NOT players - no roster entry, no input, no duplicate-tab check. They get
+// ACHUNK frames + audio config updates on their own TCP stream so audio never
+// queues behind a fat video keyframe on the /stream socket.
+function attachAudioClient(ws, consoleParam, user) {
+    const cons = resolveConsole(consoleParam);
+    if (!cons) {
+        ws.send(JSON.stringify({ t: 'welcome', audio: null, error: 'unknown-console' }));
+        const die = () => { try { ws.close(4004, 'unknown-console'); } catch {} };
+        setTimeout(die, 300);
+        return;
+    }
+    const a = { ws, username: (user && user.username) || 'Guest', isAlive: true };
+    ws.on('pong', () => { a.isAlive = true; });
+    cons.audioClients.add(a);
+    logV(`audio: client attached to "${cons.key}" (${cons.audioClients.size})`);
+    if (ws.readyState === 1) { try { ws.send(JSON.stringify({ t: 'welcome', audio: cons.audioConfig })); } catch {} }
+    ws.on('message', () => {});   // passive
+    ws.on('close', () => cons.audioClients.delete(a));
+    ws.on('error', () => {});
+}
+
 function handleViewerMsg(cons, v, msg) {
     switch (msg && msg.t) {
         case 'input': {
@@ -1371,6 +1405,20 @@ function broadcastBinary(cons, buf) {
         if (v.ws.readyState !== 1) continue;
         if (v.ws.bufferedAmount > 2 * 1024 * 1024) continue;
         try { v.ws.send(buf); } catch {}
+    }
+}
+function broadcastAudio(cons, buf) {
+    for (const a of cons.audioClients.values()) {
+        if (a.ws.readyState !== 1) continue;
+        if (a.ws.bufferedAmount > 512 * 1024) continue;
+        try { a.ws.send(buf); } catch {}
+    }
+}
+function broadcastAudioJson(cons, obj) {
+    const s = JSON.stringify(obj);
+    for (const a of cons.audioClients.values()) {
+        if (a.ws.readyState !== 1) continue;
+        try { a.ws.send(s); } catch {}
     }
 }
 function broadcastRoster(cons) {
@@ -1583,6 +1631,14 @@ setInterval(() => {
             }
             v.isAlive = false;
             try { v.ws.ping(); } catch {}
+        }
+        for (const a of [...cons.audioClients.values()]) {
+            if (!a.isAlive) {
+                try { a.ws.terminate(); } catch {}
+                continue;
+            }
+            a.isAlive = false;
+            try { a.ws.ping(); } catch {}
         }
         const h = cons.hostSock;
         if (h) {

@@ -704,8 +704,52 @@ function streamWsUrl(consoleName) {
     return `${proto}//${host}/stream?token=${encodeURIComponent(token)}&console=${encodeURIComponent(consoleName)}`;
 }
 
+// Audio rides its OWN websocket: audio chunks stop queueing behind fat video
+// keyframes (head-of-line blocking) since each socket is its own TCP stream.
+function audioWsUrl(consoleName) {
+    const token = localStorage.getItem('token') || '';
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const host = location.host || 'localhost:8090';
+    return `${proto}//${host}/audio?token=${encodeURIComponent(token)}&console=${encodeURIComponent(consoleName)}`;
+}
+
+let audioWs = null;
+let audioReconnectTimer = null;
+function connectAudioWs(consoleName) {
+    stopAudioWs();
+    try { audioWs = new WebSocket(audioWsUrl(consoleName)); } catch { return; }
+    audioWs.binaryType = 'arraybuffer';
+
+    audioWs.onmessage = (ev) => {
+        if (typeof ev.data !== 'string') {
+            const buf = new Uint8Array(ev.data);
+            if (buf.length < 9) return;
+            const kind = buf[0];
+            if (kind !== KIND.ACHUNK) return;
+            const timestamp = new DataView(ev.data).getFloat64(1, true);
+            try { decodeAudio(timestamp, buf.subarray(9)); } catch (e) { console.error('audio decode error:', e); }
+            return;
+        }
+        let msg; try { msg = JSON.parse(ev.data); } catch { return; }
+        if (msg.t === 'aconfig' && msg.config) configureAudio(msg.config);
+    };
+    audioWs.onclose = () => {
+        audioWs = null;
+        // Silent retry: audio recovering on its own is normal; the main stream
+        // handles the "you have disconnected" UX.
+        if (currentConsoleName) audioReconnectTimer = setTimeout(() => { audioReconnectTimer = null; if (currentConsoleName) connectAudioWs(currentConsoleName); }, 1500);
+    };
+    audioWs.onerror = () => {};
+}
+
+function stopAudioWs() {
+    if (audioReconnectTimer) { clearTimeout(audioReconnectTimer); audioReconnectTimer = null; }
+    if (audioWs) { try { audioWs.onclose = null; audioWs.close(); } catch {} audioWs = null; }
+}
+
 function connectStreamWs(consoleName) {
     setStreamStatus('connecting…');
+    connectAudioWs(consoleName);
 
     streamWs = new WebSocket(streamWsUrl(consoleName));
     streamWs.binaryType = 'arraybuffer';
@@ -726,7 +770,8 @@ function connectStreamWs(consoleName) {
             const payload = buf.subarray(9);
             try {
                 if (kind === KIND.VKEY || kind === KIND.VDELTA) decodeVideo(kind, timestamp, payload);
-                else if (kind === KIND.ACHUNK) decodeAudio(timestamp, payload);
+                // ACHUNK arrives on the dedicated /audio socket now; ignore it
+                // here so a legacy relay never double-decodes audio.
             } catch (e) { console.error('decode error:', e); }
             return;
         }
@@ -892,6 +937,7 @@ function decoderErrorMsg(e) {
 }
 
 function stopStream() {
+    stopAudioWs();
     if (streamWs) { try { streamWs.close(); } catch {} streamWs = null; }
     if (videoDecoder && videoDecoder.state !== 'closed') { try { videoDecoder.close(); } catch {} videoDecoder = null; }
     if (audioDecoder && audioDecoder.state !== 'closed') { try { audioDecoder.close(); } catch {} audioDecoder = null; }
