@@ -964,6 +964,7 @@ async function handleUpgrade(req, socket, head) {
 
     await new Promise((resolve) => {
         wss.handleUpgrade(req, socket, head, (ws) => {
+            try { ws._socket.setNoDelay(true); } catch {}   // kill Nagle: low-latency small frames
             if (url === '/host') attachHost(ws, params.get('console') || '');
             else if (url === '/stream') attachViewer(ws, params.get('console') || '', user, clientIp(req));
             else attachAudioClient(ws, params.get('console') || '', user);

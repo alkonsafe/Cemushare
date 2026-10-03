@@ -958,6 +958,7 @@ function connect() {
     ws = new WebSocket(url);
     ws.onopen = () => {
         wsReady = true;
+        try { ws._socket.setNoDelay(true); } catch {}   // kill Nagle: input + media go out immediately
         log('relay connected — registering');
         ws.send(JSON.stringify({
             t: 'register',
