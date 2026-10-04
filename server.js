@@ -311,6 +311,8 @@ function makeConsoleState(key, name) {
         motd: null,
         viewers: new Map(),
         audioClients: new Set(),    // passive audio-only sockets (/audio) - not players
+        audioHostSock: null,        // full host's dedicated audio link (/audiohost)
+        audioHostId: null,          // one-time id the host uses to attach that link
         hostSock: null, hostAlive: false,
         mode: 'anarchy',            // 'anarchy' | 'democracy'
         lastSentKeys: '',
@@ -347,6 +349,9 @@ function sanitizeGameList(list) {
     }
     return out;
 }
+
+// One-time ids mapping the full host's audio link (/audiohost?id=...) to its console.
+const audioHostIds = new Map();
 
 // ── Media framing ────────────────────────────────────────────────────────────
 // [0] uint8  kind  2=video-key 3=video-delta 5=audio-chunk
@@ -932,15 +937,16 @@ server.on('upgrade', (req, socket, head) => {
 async function handleUpgrade(req, socket, head) {
     const url = (req.url || '').split('?')[0];
     const params = new URL(req.url, 'http://x').searchParams;
-    if (url !== '/host' && url !== '/stream' && url !== '/audio') { socket.destroy(); return; }
+    if (url !== '/host' && url !== '/stream' && url !== '/audio' && url !== '/audiohost') { socket.destroy(); return; }
 
-    // Hosts are token-gated: only our own chromium processes may connect.
-    if (url === '/host') {
+    // Hosts (and their audio up-link) are token-gated: only our own processes may connect.
+    if (url === '/host' || url === '/audiohost') {
         const token = params.get('token') || '';
         if (!HOST_TOKEN || token.length !== HOST_TOKEN.length ||
             !crypto.timingSafeEqual(Buffer.from(token), Buffer.from(HOST_TOKEN))) {
             socket.destroy(); return;
         }
+        if (url === '/audiohost' && !audioHostIds.has(params.get('id') || '')) { socket.destroy(); return; }
     }
 
     // Viewers (and passive audio clients) must present a signed session token.
@@ -966,6 +972,7 @@ async function handleUpgrade(req, socket, head) {
         wss.handleUpgrade(req, socket, head, (ws) => {
             try { ws._socket.setNoDelay(true); } catch {}   // kill Nagle: low-latency small frames
             if (url === '/host') attachHost(ws, params.get('console') || '');
+            else if (url === '/audiohost') attachAudioHost(ws, params.get('id') || '');
             else if (url === '/stream') attachViewer(ws, params.get('console') || '', user, clientIp(req));
             else attachAudioClient(ws, params.get('console') || '', user);
             resolve();
@@ -1056,6 +1063,11 @@ function attachHost(ws, consoleParam) {
                     else log(`host "${cons.name}" (${consoleKey}): re-registered (was already online)`);
                     dbfire('run', 'touchConsole', [Date.now(), consoleKey]);
                     if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'registered', key: consoleKey, name: cons.name }));
+                    // Issue a fresh one-time id for the host's dedicated audio link.
+                    if (cons.audioHostId) audioHostIds.delete(cons.audioHostId);
+                    cons.audioHostId = crypto.randomBytes(12).toString('hex');
+                    audioHostIds.set(cons.audioHostId, consoleKey);
+                    if (ws.readyState === 1) ws.send(JSON.stringify({ t: 'audioid', id: cons.audioHostId }));
                     cons.games = sanitizeGameList(meta.games);
                     if (cons.games.length) {
                         log(`games: "${cons.key}" advertises ${cons.games.length} launchable game(s)`);
@@ -1097,6 +1109,10 @@ function attachHost(ws, consoleParam) {
             cons.hostAlive = false;
             cons.lastKeyframe = null;
             const wasStreaming = sawFirstFrame;
+            // Kill the host's audio up-link + invalidate its audio id: audio
+            // without a live host is stale.
+            if (cons.audioHostSock) { try { cons.audioHostSock.terminate(); } catch {} cons.audioHostSock = null; }
+            if (cons.audioHostId) { audioHostIds.delete(cons.audioHostId); cons.audioHostId = null; }
             log(`host "${cons.key}": disconnected${wasStreaming ? ' (was streaming)' : ''}`);
             broadcastJson(cons, { t: 'host', up: false });
             dbfire('run', 'touchConsole', [Date.now(), cons.key]);
@@ -1297,6 +1313,28 @@ function attachViewer(ws, consoleParam, user, ip) {
 }
 
 // ── Audio side ──────────────────────────────────────────────────────────────
+// The full host's dedicated audio UP-link (/audiohost?id=...): same host token,
+// plus the one-time id issued at register so we know which console the audio
+// belongs to. Frames arriving here are treated exactly like ACHUNK chunks from
+// the /host socket (broadcast to the /audio viewers).
+function attachAudioHost(ws, id) {
+    const consoleKey = audioHostIds.get(id);
+    const cons = consoleKey ? consoles.get(consoleKey) : null;
+    if (!cons) { try { ws.close(4004, 'unknown-audio-id'); } catch {} return; }
+    if (cons.audioHostSock) { try { cons.audioHostSock.close(4000, 'replaced'); } catch {} }
+    cons.audioHostSock = ws;
+    log(`audio host link attached to "${cons.key}"`);
+    ws.on('message', (data, isBinary) => {
+        if (!isBinary) return;
+        if (data.length > MAX_MEDIA_FRAME) return;
+        cons.stats.bytes += data.length;
+        broadcastAudio(cons, data);
+    });
+    ws.on('close', () => { if (cons.audioHostSock === ws) cons.audioHostSock = null; });
+    ws.on('error', () => {});
+}
+
+// ── Audio side: passive viewers (/audio) ────────────────────────────────────
 // Passive audio-only connections (/audio): same auth as viewers, but they are
 // NOT players - no roster entry, no input, no duplicate-tab check. They get
 // ACHUNK frames + audio config updates on their own TCP stream so audio never
@@ -1650,6 +1688,12 @@ setInterval(() => {
             }
             h._esAlive = false;
             try { h.ping(); } catch {}
+        }
+        const ah = cons.audioHostSock;
+        if (ah) {
+            if (ah._esAlive === false) { try { ah.terminate(); } catch {} continue; }
+            ah._esAlive = false;
+            try { ah.ping(); } catch {}
         }
     }
 }, 15000);

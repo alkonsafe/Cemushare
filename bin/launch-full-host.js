@@ -398,6 +398,12 @@ function frame(kind, time, payload) {
 }
 function sendMedia(kind, time, payload) {
     if (!payload.length) return;   // decoder chokes on empty buffers
+    // Audio goes through the dedicated /audiohost up-link; video stays on the
+    // main host socket. (Drop audio while the link reconnects - it recovers fast.)
+    if (kind === KIND.ACHUNK) {
+        if (audioWs && audioWs.readyState === WebSocket.OPEN) { try { audioWs.send(frame(kind, time, payload)); } catch {} }
+        return;
+    }
     if (!wsReady || !ws || (ws.bufferedAmount || 0) > 4 * 1024 * 1024) return;
     try { ws.send(frame(kind, time, payload)); } catch {}
 }
@@ -987,15 +993,43 @@ function connect() {
             case 'snapshot': takeSnapshot(); break;
             case 'reload': log('relay asked for a reload — restarting capture'); startCaptures(); break;
             case 'launch': launchGame(msg.game); break;
+            case 'audioid': connectAudioHost(msg.id); break; // one-time id for our dedicated audio up-link
             default: break;
         }
     };
     ws.onclose = () => {
         wsReady = false; releaseAll(); stopCaptures();
+        if (audioWs) { try { audioWs.onclose = null; audioWs.close(); } catch {} audioWs = null; }
         console.log('[full] relay disconnected — retrying in 1s');
         setTimeout(connect, 1000);
     };
     ws.onerror = () => {};
+}
+
+// ── Audio up-link (/audiohost) ───────────────────────────────────────────────
+// The relay hands us a one-time id at register; audio frames stream through a
+// dedicated socket with that id, so they never queue behind video keyframes on
+// the main host socket (and the relay knows which console they belong to).
+let audioWs = null, audioId = null;
+function connectAudioHost(id) {
+    audioId = id;
+    if (audioWs) { try { audioWs.onclose = null; audioWs.close(); } catch {} audioWs = null; }
+    let url = relayUrl.replace(/\/$/, '');
+    if (url.endsWith('/host')) url = url.slice(0, -5);
+    url += '/audiohost?' + `token=${encodeURIComponent(hostToken)}&id=${encodeURIComponent(id)}`;
+    try { audioWs = new WebSocket(url); } catch { return; }
+    audioWs.onopen = () => {
+        try { audioWs._socket.setNoDelay(true); } catch {}
+        log('audio up-link connected');
+    };
+    audioWs.onclose = (ev) => {
+        const wasCurrent = audioWs && audioId === id;
+        audioWs = null;
+        // Silent retry while the link is still current (transient drops); a 4004
+        // means the relay invalidated the id — a fresh one arrives at re-register.
+        if (wsReady && wasCurrent && (!ev || ev.code !== 4004)) setTimeout(() => { if (wsReady && audioId === id) connectAudioHost(id); }, 2000);
+    };
+    audioWs.onerror = () => {};
 }
 
 // ── Main ─────────────────────────────────────────────────────────────────────

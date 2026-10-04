@@ -28,7 +28,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const w = new WebSocket(`ws://127.0.0.1:${PORT}${path}`);
         const bin = [], msgs = [];
         w.addEventListener('message', (e) => { if (typeof e.data === 'string') msgs.push(JSON.parse(e.data)); else bin.push(e.data.length); });
+        w.addEventListener('error', () => {});
         w.addEventListener('open', () => res({ w, bin, msgs }));
+        w.addEventListener('close', () => res({ w, bin, msgs, closed: true }));   // rejected sockets resolve here
     });
 
     const S = await openWs(`/stream?console=audbench&token=${tok}`);
@@ -49,6 +51,26 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     host.send(JSON.stringify({ t: 'aconfig', config: { codec: 'opus', sampleRate: 48000 } }));
     await sleep(300);
     check('audio ws got aconfig', A.msgs.some((m) => m.t === 'aconfig' && m.config && m.config.codec === 'opus'), JSON.stringify(A.msgs.map((m) => m.t)));
+
+    // ── audiohost up-link: relay issues an id at register, host streams there ──
+    const hostMsgs = [];
+    host.addEventListener('message', (e) => { try { hostMsgs.push(JSON.parse(e.data)); } catch {} });
+    host.send(JSON.stringify({ t: 'register', console: { key: 'audbench', name: 'Aud Bench', image: 'src', category: 'T', description: '' } }));
+    await sleep(300);
+    const audioidMsg = [...hostMsgs].reverse().find((m) => m.t === 'audioid');
+    check('host got audioid at re-register', !!(audioidMsg && audioidMsg.id), JSON.stringify(hostMsgs.map((m) => m.t)));
+
+    const AH = await openWs(`/audiohost?token=tok-t&id=${audioidMsg.id}`);
+    await sleep(200);
+    host.send(frame(2, Buffer.from('VIDKEY2')));
+    AH.w.send(frame(5, Buffer.from('HOSTAUDIO')));
+    await sleep(400);
+    check('audio client received audio from the audiohost link', A.bin.includes(18), JSON.stringify(A.bin));
+    check('stream viewer did NOT receive the audiohost chunk', !S.bin.includes(11), JSON.stringify(S.bin));
+
+    // invalid id rejected
+    const bad = await openWs(`/audiohost?token=tok-t&id=nope`);
+    check('bad audiohost id rejected', bad.closed === true, 'closed=' + !!bad.closed);
 
     srv.kill('SIGKILL');
     await sleep(200);
